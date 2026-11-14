@@ -177,9 +177,17 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 Ports: **8090/tcp** (dashboard + chunk API) and **8091/udp** (LAN
-discovery beacons). The container reads the config read-only from
-`~/.config/chunkdrop/engine.toml`; alternatively pass the key as an
-env var (no config file at all):
+discovery beacons). The container runs as a non-root user, by default
+uid/gid **1000** (`PUID`/`PGID` in `deploy/docker-compose.yml`). Since
+`engine keygen` writes `engine.toml` as `0600`, the container user must
+be the file's owner — if your user is not uid 1000, pass your ids:
+
+```bash
+PUID=$(id -u) PGID=$(id -g) docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+(or `chmod 644 ~/.config/chunkdrop/engine.toml`; or skip the file and
+pass the key as an env var instead:)
 
 ```yaml
 environment:
@@ -197,11 +205,13 @@ Caveats specific to Docker:
   `network_mode: host` (or `-net=host`) the engine sees the real LAN
   and QRs work as on a bare-metal host; with the default bridge you
   may need `bind_ip = "<host LAN ip>"` in the config (§5.4).
-- The engine writes **nothing** outside RAM (sessions) and the config
-  file, so no other volumes are needed. The sync folder
-  (`~/Downloads/chunk-drop-files`, M0.1) is *not* mounted in the
-  container by default — mount it if you want container↔container
-  sync: `- ~/Downloads/chunk-drop-files:/config/Downloads/chunk-drop-files`.
+- The container's home `/config` is a writable volume (the config
+  itself is mounted read-only inside it): sync-folder cache and temp
+  files live there. To sync a **host** folder instead, uncomment the
+  `CHUNKDROP_SYNC` mount in `deploy/docker-compose.yml`; the folder
+  must be writable by the container user (`PUID`/`PGID` above — your
+  own ids when you pass them). Otherwise the engine logs the sync
+  folder as unavailable and only direct transfers work.
 
 ---
 
@@ -453,6 +463,23 @@ from a file merely *not* being announced — which is also what a peer
 restarting looks like — so deletions ping-ponged and never converged.
 Update all engines; a mixed mesh with old builds can still resurrect
 files.
+
+### 5.11 Docker: "engine.toml: permission denied" on a loop
+
+The container runs as a non-root user (`PUID`/`PGID`, default
+`1000`), and `engine keygen` writes `engine.toml` as `0600` — only its
+owner can read it. If your uid is not 1000, start the container as
+yourself (the current compose file supports this):
+
+```bash
+PUID=$(id -u) PGID=$(id -g) docker compose -f deploy/docker-compose.yml up -d --force-recreate
+```
+
+Alternative: `chmod 644 ~/.config/chunkdrop/engine.toml` (group key
+becomes readable to local users), or remove the mount and set
+`CHUNKDROP_GROUP_KEY=<key>` in the compose environment. A host sync
+folder the container cannot write has the same cause — mount it and use
+your `PUID`/`PGID`.
 
 ---
 

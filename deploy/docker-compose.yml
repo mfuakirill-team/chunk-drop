@@ -1,7 +1,13 @@
 # ChunkDrop engine in Docker.
 # Ports: 8090/tcp (HTTP UI + API), 8091/udp (LAN discovery beacons).
-# Config: engine.toml (group_key) — either mount it (read-only) or pass
-# the key via env CHUNKDROP_GROUP_KEY (see Dockerfile ENV).
+#
+# Config: engine.toml (group_key), bind-mounted read-only. The container
+# runs as a non-root user — uid/gid 1000 by default (PUID/PGID), because
+# `engine keygen` writes the config 0600 and only its owner can read it.
+# If `id -u` is not 1000, run:
+#   PUID=$(id -u) PGID=$(id -g) docker compose up -d --build
+# (or `chmod 644 ~/.config/chunkdrop/engine.toml`, or drop the mount and
+# pass CHUNKDROP_GROUP_KEY=<key> in the environment).
 #
 # Usage: docker compose up -d --build
 services:
@@ -15,15 +21,19 @@ services:
     ports:
       - "8090:8090"
       - "8091:8091/udp"
+    # Must match the owner of engine.toml, otherwise the unprivileged
+    # container user cannot read it. Override with PUID/PGID.
+    user: "${PUID:-1000}:${PGID:-1000}"
     volumes:
       # read-only config; the engine writes nothing to it
-      - ~/.config/chunkdrop/engine.toml:/config/.config/chunkdrop/engine.toml:ro
+      - ${CHUNKDROP_CONFIG:-~/.config/chunkdrop/engine.toml}:/config/.config/chunkdrop/engine.toml:ro
+      # optional shared folder (needs writable perms for the uid above):
+      # - ${CHUNKDROP_SYNC:-~/Downloads/chunk-drop-files}:/config/Downloads/chunk-drop-files
     environment:
       - HOME=/config
-      # fallback if no engine.toml mounted:
+      # fallback if no engine.toml is mounted:
       # - CHUNKDROP_GROUP_KEY=<paste group key here>
-    # drop root privileges inside the container
-    user: "65534:65534"
+    # read-only root filesystem; /config is the one writable volume
     read_only: true
     tmpfs:
       - /tmp

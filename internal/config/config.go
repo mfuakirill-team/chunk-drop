@@ -6,7 +6,9 @@ package config
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -87,6 +89,14 @@ func Load() (Config, string, error) {
 		return cfg, path, nil
 	}
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			// The common case is a 0600 engine.toml in a container that
+			// runs as another uid — say how to fix it, not just "denied".
+			return cfg, path, fmt.Errorf("parse %s: %w\n"+
+				"  the engine user cannot read the config (engine keygen writes it 0600).\n"+
+				"  Docker: run the container as the file owner — PUID=$(id -u) PGID=$(id -g) docker compose up -d;\n"+
+				"  alternatively chmod 644 the file, or pass CHUNKDROP_GROUP_KEY=<key> and mount nothing.", path, err)
+		}
 		return cfg, path, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if cfg.Port == 0 {
