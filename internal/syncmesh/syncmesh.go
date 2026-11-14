@@ -41,6 +41,11 @@ const SyncDirName = "chunk-drop-files"
 // CacheDirName is the sync metadata subfolder ("hashes").
 const CacheDirName = "hashes"
 
+// PartSuffix marks an in-progress sync pull's temp file ("x.iso.part").
+// Temp files are engine-internal state: never scanned, never announced,
+// never planned from remote announcements.
+const PartSuffix = ".part"
+
 // ScanInterval is how often the local folder is rescanned.
 const ScanInterval = 5 * time.Second
 
@@ -177,6 +182,14 @@ func walkFiles(root string, fn func(rel, abs string, info os.FileInfo)) error {
 		}
 		info, ierr := d.Info()
 		if ierr != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		// In-progress pulls ("x.iso.part") are engine-internal temp
+		// files, never content. Announcing them made peers pull each
+		// other's half-finished downloads back ("downloaded
+		// debian.iso.part from linux") — a self-feeding loop that
+		// doubled traffic and littered sync folders with junk.
+		if strings.HasSuffix(d.Name(), PartSuffix) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
@@ -441,6 +454,16 @@ type Needed struct {
 	Peers []string // engine ids that announced it
 }
 
+// syncableRel filters rels that must never enter the pull plan from
+// remote announcements: in-progress ".part" temp files (peers on older
+// builds still announce theirs) and the engine's own metadata folder.
+func syncableRel(rel string) bool {
+	if strings.HasSuffix(rel, PartSuffix) {
+		return false
+	}
+	return rel != CacheDirName && !strings.HasPrefix(rel, CacheDirName+"/")
+}
+
 // ComputeNeeded merges peer announcements into a pull plan keyed by
 // rel, with the newest mtime as the target and its swarm attached.
 func ComputeNeeded(local map[string]*LocalFile, anns []*Announcement) map[string]*Needed {
@@ -451,6 +474,9 @@ func ComputeNeeded(local map[string]*LocalFile, anns []*Announcement) map[string
 	cands := map[string]*cand{}
 	for _, a := range anns {
 		for rel, meta := range a.Files {
+			if !syncableRel(rel) {
+				continue
+			}
 			c, ok := cands[rel]
 			if !ok {
 				c = &cand{meta: meta, who: []string{a.Engine}}
@@ -665,7 +691,16 @@ func (p *Puller) Pull(l *Local, n *Needed, peers []PeerRef) error {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return err
 	}
-	part := abs + ".part"
+	// Temp file lives in the excluded metadata folder (hashes/tmp),
+	// never beside the target: a half-written pull must not show up in
+	// the sync folder where Scan would announce it to peers (the
+	// ".part ping-pong" bug) or litter the user's folder after a
+	// crash. Same filesystem → the final rename is still atomic.
+	tmpDir := filepath.Join(l.Dir, CacheDirName, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return err
+	}
+	part := filepath.Join(tmpDir, filepath.Base(n.Rel)+PartSuffix)
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
@@ -826,6 +861,9 @@ func (r *Runner) SyncOnce() error {
 		return nil
 	}
 	// 2. Plan + pull (per file: its swarm — every peer that has it).
+	// Pulls are serial within this loop, so any temp file still in
+	// hashes/tmp is a crash leftover from a previous run — clear it.
+	_ = os.RemoveAll(filepath.Join(r.Local.Dir, CacheDirName, "tmp"))
 	plan := ComputeNeeded(r.Local.Files(), anns)
 	engineByName := map[string]PeerRef{}
 	for _, pe := range peers {

@@ -1,10 +1,19 @@
 package syncmesh
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"chunkdrop/internal/activity"
+	"chunkdrop/internal/transfer"
 )
 
 func testLocal(t *testing.T, files map[string]string) (*Local, string) {
@@ -194,5 +203,146 @@ func TestDeleteLocal(t *testing.T) {
 	l.DeleteLocal("x.txt") // must not fail even though disk file is gone
 	if _, ok := l.Files()["x.txt"]; ok {
 		t.Error("file still listed after DeleteLocal")
+	}
+}
+
+// The ".part ping-pong" bug: a peer pulling our file writes its
+// in-progress copy as "x.iso.part" inside its sync folder; if Scan
+// announced it, other engines pulled the half-finished file back —
+// repeatedly, as it grew. Parts must be invisible to sync at every
+// stage: scan, announcements, and pull planning.
+func TestPartFilesNeverSynced(t *testing.T) {
+	l, _ := testLocal(t, map[string]string{
+		"real.txt":        "content",
+		"debian.iso.part": "half-written garbage",
+		"sub/other.part":  "more junk",
+	})
+	files := l.Files()
+	if _, ok := files["debian.iso.part"]; ok {
+		t.Error("in-progress .part file must never be scanned/announced")
+	}
+	if _, ok := files["sub/other.part"]; ok {
+		t.Error("nested .part file must never be scanned/announced")
+	}
+	if _, ok := files["real.txt"]; !ok {
+		t.Error("scan broke: real file missing")
+	}
+	// Defensive: even if an older build announces its .part temps (or
+	// engine metadata), the planner must never schedule a pull.
+	plan := ComputeNeeded(files, []*Announcement{{Engine: "old", Name: "old", Files: map[string]*FileMeta{
+		"remote.part":       {Size: 10, Mtime: time.Now(), Xxh: 5},
+		"hashes/cache.json": {Size: 10, Mtime: time.Now(), Xxh: 5},
+	}}})
+	if len(plan) != 0 {
+		t.Errorf("plan must ignore .part and metadata rels, got %v", plan)
+	}
+}
+
+// fakePeer serves the two sync endpoints (POST /api/sync/start,
+// GET /api/chunk/0/c) for a single source file, so Pull can be tested
+// without a second engine.
+func fakePeer(t *testing.T, src []byte, corrupt bool) PeerRef {
+	t.Helper()
+	const chunkSize = 1024
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/sync/start":
+			man := transfer.NewManifest("fake-session")
+			if err := man.BuildFromPairs([]transfer.SourcePair{
+				{Rel: "big.bin", Abs: writeSrc(t, src)},
+			}, transfer.BuildOptions{ChunkSize: chunkSize}); err != nil {
+				t.Errorf("manifest: %v", err)
+				http.Error(w, "boom", 500)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(startResp{SessionID: "fake-session", Key: "fake-key", Manifest: man})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/chunk/"):
+			var c int
+			if _, err := fmt.Sscanf(r.URL.Path, "/api/chunk/0/%d", &c); err != nil {
+				http.Error(w, "bad chunk", 400)
+				return
+			}
+			off := int64(c) * chunkSize
+			if off >= int64(len(src)) {
+				http.Error(w, "no such chunk", 404)
+				return
+			}
+			end := off + chunkSize
+			if end > int64(len(src)) {
+				end = int64(len(src))
+			}
+			b := append([]byte(nil), src[off:end]...)
+			if corrupt {
+				b[0] ^= 0xff // SHA-256 check must reject this
+			}
+			_, _ = w.Write(b)
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return PeerRef{Host: strings.TrimPrefix(srv.URL, "http://"), EngineID: "fake", Name: "fake"}
+}
+
+// writeSrc materializes the fake peer's source bytes on disk (the
+// manifest hashes/stream from a real file).
+func writeSrc(t *testing.T, src []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "big.bin")
+	if err := os.WriteFile(p, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// The pull temp file must live in the excluded hashes/tmp folder —
+// never beside the target in the sync folder, where a concurrent Scan
+// (api/sync/state rescans on every call!) would announce the
+// half-written file, and where crash leftovers would be user-visible.
+func TestPullTempOutsideSyncDir(t *testing.T) {
+	src := append(bytes.Repeat([]byte("chunkdrop "), 300), []byte("tail")...) // ~3 KB
+	l, dir := testLocal(t, nil)
+	p := &Puller{GroupKey: "k", Act: activity.NewLog(16), Logf: t.Logf}
+
+	// Success: file lands complete, no .part anywhere in the sync dir.
+	peer := fakePeer(t, src, false)
+	n := &Needed{Rel: "big.bin", Peers: []string{"fake"}}
+	if err := p.Pull(l, n, []PeerRef{peer}); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "big.bin"))
+	if err != nil || !bytes.Equal(got, src) {
+		t.Fatalf("pulled content wrong: %v", err)
+	}
+	if _, ok := l.Files()["big.bin"]; !ok {
+		t.Error("pulled file not registered locally")
+	}
+	assertNoParts(t, dir)
+
+	// Failure (corrupt chunk): pull errors AND cleans its temp up —
+	// no junk left in the sync folder or the temp dir.
+	l2, dir2 := testLocal(t, nil)
+	peerBad := fakePeer(t, src, true)
+	err = p.Pull(l2, &Needed{Rel: "big.bin", Peers: []string{"fake"}}, []PeerRef{peerBad})
+	if err == nil {
+		t.Fatal("corrupt chunk must fail the pull")
+	}
+	assertNoParts(t, dir2)
+}
+
+func assertNoParts(t *testing.T, syncDir string) {
+	t.Helper()
+	err := filepath.WalkDir(syncDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), PartSuffix) {
+			t.Errorf("leftover temp in sync dir: %s", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

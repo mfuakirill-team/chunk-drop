@@ -100,6 +100,14 @@ key is configured). Wrong key → `401` with the same generic body.
 | `POST /api/sync/start` | Body `{"rels":["…"]}` → session serving those files for a peer |
 | `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries]}` |
 
+Sync normative details:
+- **In-progress pull temp files are never announced or planned.** A
+  pulling engine writes its half-finished copy under the sync folder's
+  excluded `hashes/tmp/` metadata dir (never beside the target), and
+  rels ending in `.part` (or inside `hashes/`) are skipped by scan and
+  pull planning — so peers can never pull each other's partial
+  downloads back.
+
 The PWA surface (manifest, icons) is served from the same static web
 app (`/manifest.webmanifest`, `/icons/*`) — no service worker by
 design (offline caching is out of scope until it stops fighting the

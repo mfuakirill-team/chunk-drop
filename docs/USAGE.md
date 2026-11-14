@@ -405,6 +405,16 @@ silently — run via right-click → **Run anyway** once.
 | Engine machine reboot | Same as `Ctrl+C`. |
 | 24 h since session start | Session expires → 401/410 → fresh QR. |
 
+### 5.9 Stray "*.part" files in the sync folder (older build)
+
+Engines built before this fix briefly announced their in-progress sync
+pulls (`debian.iso.part`), so a peer could pull the half-finished file
+back — sometimes repeatedly, as it grew. Fixed: temp files now live in
+the excluded `hashes/tmp/` folder and are invisible to sync everywhere
+(scan, announcements, planning). Any leftover `*.part` files still
+sitting in `chunk-drop-files/` from the old build are plain junk — the
+engine ignores them; delete them by hand whenever you like.
+
 ---
 
 ## 6. What's safe / what to keep private
