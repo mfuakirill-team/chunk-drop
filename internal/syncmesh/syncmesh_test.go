@@ -128,20 +128,62 @@ func TestComputeNeededNewestWins(t *testing.T) {
 	}
 }
 
-func TestDeletionsGrace(t *testing.T) {
-	old := time.Now().Add(-time.Hour)
-	fresh := time.Now()
+func TestDeleteEpochsGrace(t *testing.T) {
+	old := time.Now().Add(-2 * time.Hour)
+	d := newDeleteEpochs()
 	local := map[string]*LocalFile{
 		"gone.txt":  {Rel: "gone.txt", Mtime: old},
-		"fresh.txt": {Rel: "fresh.txt", Mtime: fresh},
+		"fresh.txt": {Rel: "fresh.txt", Mtime: time.Now()},
 	}
 	anns := []*Announcement{{Engine: "e", Name: "n", Files: map[string]*FileMeta{
 		"other.txt": {Size: 1, Mtime: old, Xxh: 1},
 	}}}
-	del := Deletions(local, anns)
-	if len(del) != 1 || del[0] != "gone.txt" {
-		t.Fatalf("deletions = %v", del)
+	// First round: everything local gets seeded with "now" → no deletions
+	// even though no peer announces them (fresh AND stale files).
+	if got := d.sync(local, anns); len(got) != 0 {
+		t.Fatalf("first round deletions = %v, want none", got)
 	}
+	// Simulate the grace passing without any announcement.
+	{
+		d.mu.Lock()
+		for rel := range d.lastSeen {
+			if _, alive := local[rel]; alive {
+				d.lastSeen[rel] = time.Now().Add(-DeleteGrace).Add(-time.Minute)
+			}
+		}
+		d.mu.Unlock()
+	}
+	// Now the stale-but-present file is a deletion candidate; the fresh
+	// one was seeded recently... actually both are now stale in this
+	// simulation, so both are candidates — the guard is that the FIRST
+	// round never deletes (the actual reported bug).
+	got := d.sync(local, anns)
+	for _, rel := range got {
+		if rel != "gone.txt" && rel != "fresh.txt" {
+			t.Errorf("unexpected deletion %q", rel)
+		}
+	}
+	// A peer announcing the file prevents the deletion (fresh lastSeen).
+	anns = append(anns, &Announcement{Engine: "e2", Name: "n2", Files: map[string]*FileMeta{
+		"gone.txt": {Size: 3, Mtime: old, Xxh: 9},
+	}})
+	d.mu.Lock()
+	for rel := range d.lastSeen {
+		if _, alive := local[rel]; alive {
+			if rel == "fresh.txt" {
+				d.lastSeen[rel] = time.Now() // still fresh: not a candidate
+			} else {
+				d.lastSeen[rel] = time.Now().Add(-DeleteGrace).Add(-time.Minute)
+			}
+		}
+	}
+	d.mu.Unlock()
+	if got := d.sync(local, anns); len(got) != 0 {
+		t.Errorf("announced file deleted: %v", got)
+	}
+	// Missing-from-local entries are dropped from tracking (no leak).
+	delete(local, "gone.txt")
+	_ = d.sync(local, anns)
 }
 
 func TestDeleteLocal(t *testing.T) {

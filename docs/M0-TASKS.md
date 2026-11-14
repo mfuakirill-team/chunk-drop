@@ -110,6 +110,12 @@ not "device-tested".
       exist since M0.1; wrong key would be 401 (`USAGE.md` §5.0)
 - [x] Engine Docker image (`deploy/Dockerfile`, `docker-compose.yml`,
       non-root, ~15 MB, 8090/tcp + 8091/udp, `CHUNKDROP_GROUP_KEY` env)
+      — **for LAN machines (NAS/home server)**; the VPS container
+      (hub: relay + PWA host, client-side opt-out) stays M2 per
+      `DEPLOY-VPS.md`
+- [x] Sync delete-propagation race fixed: per-file "last seen
+      announced" epochs — a peer restarting/rescanning no longer makes
+      other engines delete files mid-transfer
 
 ## After M0
 

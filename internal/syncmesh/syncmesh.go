@@ -44,8 +44,10 @@ const CacheDirName = "hashes"
 // ScanInterval is how often the local folder is rescanned.
 const ScanInterval = 5 * time.Second
 
-// DeleteGrace keeps freshly-created local files out of delete
-// propagation (they may just not be announced *yet*).
+// DeleteGrace is how long a *previously announced* local file must be
+// absent from every reachable peer's announcement before delete
+// propagation fires. A peer rescanning/restarting mid-announce must not
+// cost us data (the "file deleted itself during transfer" bug).
 const DeleteGrace = 2 * time.Minute
 
 // LocalFile is one file in the local sync folder.
@@ -476,19 +478,62 @@ func ComputeNeeded(local map[string]*LocalFile, anns []*Announcement) map[string
 	return out
 }
 
-// Deletions lists local files no peer announces (older than the
-// delete grace) — delete propagation targets.
-func Deletions(local map[string]*LocalFile, anns []*Announcement) []string {
+// deleteEpochs tracks, per rel, when we *last saw a peer announce* a
+// local file (or, for never-announced files, when we first scanned
+// it). Delete propagation fires only for files absent from every
+// announcement for a full DeleteGrace. This guards against the
+// classic races that silently ate files ("remote thinks it's
+// deleted → local deletes it while the pull of that very file is
+// still in flight"): a peer restarting/rescanning announces an empty
+// or partial folder for a few seconds, and without epochs every other
+// box would delete everything older than the grace instantly.
+type deleteEpochs struct {
+	mu       sync.Mutex
+	lastSeen map[string]time.Time // rel → last time any peer announced it (or first local scan)
+}
+
+func newDeleteEpochs() *deleteEpochs {
+	return &deleteEpochs{lastSeen: map[string]time.Time{}}
+}
+
+// sync seeds/advances lastSeen from this pass's announcements and
+// returns the deletion candidates. Call AFTER a successful full
+// announcement round.
+func (d *deleteEpochs) sync(local map[string]*LocalFile, anns []*Announcement) []string {
+	now := time.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// 1. Every locally-present file must exist in the map (seed on
+	//    first sight so brand-new files get the full grace too).
+	for rel := range local {
+		if _, ok := d.lastSeen[rel]; !ok {
+			d.lastSeen[rel] = now
+		}
+	}
+	// 2. Advance lastSeen for everything any peer announces.
+	for _, a := range anns {
+		for rel := range a.Files {
+			if t, ok := d.lastSeen[rel]; !ok || now.After(t) {
+				d.lastSeen[rel] = now
+			}
+		}
+	}
+	// 3. Deletion candidates: local files whose lastSeen is stale
+	//    AND that are absent from every current announcement.
 	announced := map[string]bool{}
 	for _, a := range anns {
 		for rel := range a.Files {
 			announced[rel] = true
 		}
 	}
+	cut := now.Add(-DeleteGrace)
 	var out []string
-	cut := time.Now().Add(-DeleteGrace)
-	for rel, lf := range local {
-		if !announced[rel] && lf.Mtime.Before(cut) {
+	for rel, last := range d.lastSeen {
+		if _, alive := local[rel]; !alive {
+			delete(d.lastSeen, rel) // file's gone locally anyway: forget it
+			continue
+		}
+		if !announced[rel] && last.Before(cut) {
 			out = append(out, rel)
 		}
 	}
@@ -751,6 +796,9 @@ type Runner struct {
 	Logf     func(string, ...any)
 	// Act receives concise activity events (nil = disabled).
 	Act *activity.Log
+
+	// deleting tracks per-file delete-epoch state (race guard).
+	deleting *deleteEpochs
 }
 
 // SyncOnce runs one full planning + pull + delete-propagation pass.
@@ -799,8 +847,13 @@ func (r *Runner) SyncOnce() error {
 			r.Act.Add(activity.KindError, fmt.Sprintf("pull %s failed: %v", rel, err))
 		}
 	}
-	// 3. Delete propagation (files no peer announces, past grace).
-	for _, rel := range Deletions(r.Local.Files(), anns) {
+	// 3. Delete propagation (files no peer announces for a full grace,
+	//    per-file last-seen epochs — see deleteEpochs for the race
+	//    this closes).
+	if r.deleting == nil {
+		r.deleting = newDeleteEpochs()
+	}
+	for _, rel := range r.deleting.sync(r.Local.Files(), anns) {
 		r.Local.DeleteLocal(rel)
 		r.logf("sync: deleted %s (deleted on a peer)", rel)
 		r.Act.Add(activity.KindDown, fmt.Sprintf("deleted %s (deleted on a peer)", rel))

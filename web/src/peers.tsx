@@ -1,9 +1,9 @@
 import { useEffect, useState } from "preact/hooks";
 
-// Side panel (#7 + #1.3): LAN clients with their IPs (discovery), the
-// concise activity feed (what's uploading / downloading right now),
-// and the live receiver progress of the running transfer — all in one
-// place so "is the system working?" is answerable at a glance.
+// Side panel (#7 + #1.3): two separate frames — "LAN clients" (the
+// discovery table with peers' IPs) and, below it, "Activity" (what's
+// uploading / downloading right now + live receiver progress of the
+// running transfer).
 
 import { KEY_HEADER } from "./api";
 import { loadGroupKey } from "./storage";
@@ -49,35 +49,33 @@ const KIND_MARK: Record<string, string> = {
   error: "!",
 };
 
-export function PeersPanel({ send }: { send: SendState | null }) {
+async function fetchJson<T>(path: string): Promise<T | null> {
+  const key = loadGroupKey();
+  const headers: Record<string, string> = {};
+  if (key) headers[KEY_HEADER] = key;
+  try {
+    const r = await fetch(path, { headers });
+    if (!r.ok) return null;
+    return (await r.json()) as T;
+  } catch {
+    return null; // engine gone; keep last state
+  }
+}
+
+function fmtTime(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+export function PeersPanel() {
   const [peers, setPeers] = useState<PeersResp | null>(null);
-  const [act, setAct] = useState<ActivityResp | null>(null);
-  const [open, setOpen] = useState(true);
 
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      const key = loadGroupKey();
-      const headers: Record<string, string> = {};
-      if (key) headers[KEY_HEADER] = key;
-      try {
-        const r = await fetch("/api/peers", { headers });
-        if (r.ok) {
-          const resp = (await r.json()) as PeersResp;
-          if (alive) setPeers(resp);
-        }
-      } catch {
-        /* engine gone; keep last state */
-      }
-      try {
-        const r = await fetch("/api/activity", { headers });
-        if (r.ok) {
-          const resp = (await r.json()) as ActivityResp;
-          if (alive) setAct(resp);
-        }
-      } catch {
-        /* same */
-      }
+      const resp = await fetchJson<PeersResp>("/api/peers");
+      if (resp && alive) setPeers(resp);
     };
     void load();
     const t = setInterval(load, 3000);
@@ -93,52 +91,79 @@ export function PeersPanel({ send }: { send: SendState | null }) {
       )
     : [];
 
+  return (
+    <div class="card">
+      <h3 style="margin-top:0">LAN clients</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>name</th>
+            <th>ip</th>
+            <th class="num">port</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => (
+            <tr>
+              <td>
+                {p.self ? "★ " : ""}
+                {p.name || p.id.slice(0, 8)}
+              </td>
+              <td>{p.ip}</td>
+              <td class="num">{p.port}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {peers && peers.peers.length === 0 && (
+        <p class="muted">no other engines found — is the other machine running?</p>
+      )}
+      {!peers && <p class="muted">discovering LAN clients…</p>}
+      <p class="muted" style="margin-bottom:0">
+        auto-sync: ~/Downloads/chunk-drop-files ↔ other engines (same
+        group key), every 5s.
+      </p>
+    </div>
+  );
+}
+
+export function ActivityPanel({ send }: { send: SendState | null }) {
+  const [act, setAct] = useState<ActivityResp | null>(null);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      const resp = await fetchJson<ActivityResp>("/api/activity");
+      if (resp && alive) setAct(resp);
+    };
+    void load();
+    const t = setInterval(load, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
   const events = act?.events ?? [];
   const latest = events.slice(-12).reverse(); // newest on top, concise
+  const liveReceiver = send?.sessionInfo?.receiver;
 
   return (
     <div class="card">
       <h3 style="margin-top:0">
-        LAN clients{" "}
+        Activity{" "}
         <button class="secondary" style="padding:2px 10px" onClick={() => setOpen(!open)}>
           {open ? "hide" : "show"}
         </button>
       </h3>
       {open && (
         <div>
-          <table>
-            <thead>
-              <tr>
-                <th>name</th>
-                <th>ip</th>
-                <th class="num">port</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((p) => (
-                <tr>
-                  <td>
-                    {p.self ? "★ " : ""}
-                    {p.name || p.id.slice(0, 8)}
-                  </td>
-                  <td>{p.ip}</td>
-                  <td class="num">{p.port}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {peers && peers.peers.length === 0 && (
-            <p class="muted">no other engines found — is the other machine running?</p>
-          )}
-          {!peers && <p class="muted">discovering LAN clients…</p>}
-
-          {/* #1.3: activity — what's uploading / downloading, concise. */}
-          <h4 style="margin-bottom:4px">Activity</h4>
-          {send?.sessionInfo?.receiver ? (
+          {/* live receiver progress of the running transfer */}
+          {liveReceiver ? (
             <p class="muted" style="margin:4px 0">
-              ▲ receiving now: {send.sessionInfo.receiver.receiver}
-              {" "}
-              ({Object.keys(send.sessionInfo.receiver.have).length} file(s) in progress)
+              ▲ receiving now: {liveReceiver.receiver} (
+              {Object.keys(liveReceiver.have).length} file(s) in progress)
             </p>
           ) : (
             <p class="muted" style="margin:4px 0">
@@ -160,16 +185,6 @@ export function PeersPanel({ send }: { send: SendState | null }) {
           </ul>
         </div>
       )}
-      <p class="muted">
-        auto-sync: ~/Downloads/chunk-drop-files ↔ other engines (same
-        group key), every 5s.
-      </p>
     </div>
   );
-}
-
-function fmtTime(iso: string): string {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "";
-  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }

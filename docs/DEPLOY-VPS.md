@@ -3,6 +3,13 @@
 **Not needed until M2.** M0–M1 are engine-only and touch no server at all.
 This doc exists now so the M2 build has nothing left to invent.
 
+**What the VPS is for (locked):** the container there is the **hub** —
+a *relay and PWA host only*. It never joins the LAN (no host network
+mode, no UDP discovery), holds no files, and lets transfers work over
+the **global network** unless the client opts out — the engine gets a
+config flag (`internet_sync = false` to disable reaching the hub) so
+the feature can be turned off on the client's side (M2 scope).
+
 ## 1. Topology (recommended — matches your setup)
 
 ```

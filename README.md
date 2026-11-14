@@ -55,6 +55,7 @@ firewall/unboxing troubleshooting: **`docs/USAGE.md`**.
 
 Prefer running the engine in Docker (home server / NAS)? `deploy/`
 has a lightweight image + compose file — `docs/USAGE.md` §3.1.
+(The VPS gets the *hub* — relay + PWA host — in M2: `docs/DEPLOY-VPS.md`.)
 
 ## Why
 

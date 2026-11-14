@@ -151,11 +151,17 @@ What the engine does while running:
 
 ### 3.1 Run the engine in Docker (lightweight container)
 
+> **Where Docker belongs:** the container below is the **engine**
+> (the LAN sender) — handy on a home server/NAS that's always on.
+> The **VPS** container is a different program: the **hub** (relay +
+> PWA host, no LAN discovery, no local files) — that's M2, see
+> `docs/DEPLOY-VPS.md`. Over the global network, transfers then work
+> through the hub unless the client opts out (config flag, M2).
+
 The engine ships as a small Docker image (multi-stage: Node builds the
 web app → Go embeds it → Alpine runtime, ~15 MB, non-root, read-only
-root filesystem). The M2 VPS *hub* (`docs/DEPLOY-VPS.md`) is a
-different, later thing — this runs the **engine** itself, e.g. on a
-home server or NAS that's always on.
+root filesystem). Ports: **8090/tcp** (dashboard + chunk API) and
+**8091/udp** (LAN discovery beacons — only meaningful on the LAN).
 
 ```bash
 # once: create the config with a fresh group key
@@ -232,9 +238,9 @@ subnet). Nothing installed, no account, no app.
 button): works, but saving needs a desktop browser with the File System
 Access API (Chrome/Edge/Chromium on Windows/Linux).
 
-### 4.2.1 The Activity panel (sender side)
+### 4.2.1 The Activity frame (sender side)
 
-The right-hand **LAN clients** card shows, below the peer table:
+Below the **LAN clients** card sits its own **Activity** card showing:
 
 - **Activity** — a concise feed of what's happening: ▲ uploading
   (sessions started, receiver progress), ▼ downloading (sync folder
@@ -472,7 +478,9 @@ browser, and the exact step from this guide.
 | Sync folder `~/Downloads/chunk-drop-files` (PC↔PC) | ✅ M0.1 |
 | Dashboard: selection frame + Reset, Cancel, Activity feed | ✅ M0.2 |
 | PWA install (iOS Safari, Android Chrome/Firefox) | ✅ M0.2 |
-| Engine in Docker (deploy/) | ✅ M0.2 |
+| Activity as a separate frame below LAN clients | ✅ M0.2 |
+| Engine in Docker (LAN machine, deploy/) | ✅ M0.2 |
+| VPS hub: relay + PWA host, global-network transfers (client opt-out) | ⬜ M2 (`DEPLOY-VPS.md`) |
 | Upload direction (phone → PC) | ⬜ M1 |
 | Internet mode via VPS hub | ⬜ M2 |
 | Resume-after-close for receivers | ⬜ M3 |
