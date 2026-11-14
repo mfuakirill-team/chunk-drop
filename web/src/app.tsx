@@ -13,9 +13,16 @@ import { SendPage, type SendState } from "./send";
 import { setFragment } from "./link";
 
 export function App() {
+  // The QR link is served at /r/ and opened on other devices, where the
+  // dashboard is unreachable by design (local-only, PROTOCOL §4.1) — so
+  // a /r/ page always starts in receive mode (no key → clear error from
+  // ReceivePage, never a dashboard that cannot work), and it carries no
+  // "back to sender dashboard" affordance. On the engine's own page (/)
+  // switching into receive mode keeps the back button.
+  const standaloneReceiveLink = location.pathname.startsWith("/r/");
   const [key, setKey] = useState(parseFragmentKey(location.hash));
   const [mode, setMode] = useState<"receive" | "send">(
-    parseFragmentKey(location.hash) ? "receive" : "send",
+    parseFragmentKey(location.hash) || standaloneReceiveLink ? "receive" : "send",
   );
   const [send, setSend] = useState<SendState | null>(null);
 
@@ -36,7 +43,10 @@ export function App() {
         <span class="muted">chunked · resumable · private</span>
       </header>
       {mode === "receive" ? (
-        <ReceivePage sessionKey={key} onBack={goSend} />
+        <ReceivePage
+          sessionKey={key}
+          onBack={standaloneReceiveLink ? undefined : goSend}
+        />
       ) : (
         <div class="columns">
           <SendPage onStart={goReceive} onChange={setSend} />
@@ -46,20 +56,22 @@ export function App() {
           </div>
         </div>
       )}
-      <footer class="muted">
-        <p>
-          {mode === "receive" ? (
-            <button class="secondary" onClick={goSend}>
-              ← sender dashboard
-            </button>
-          ) : (
-            <span>
-              Receiving on this device? Open the QR link or paste the session key
-              below.
-            </span>
-          )}
-        </p>
-      </footer>
+      {!(mode === "receive" && standaloneReceiveLink) && (
+        <footer class="muted">
+          <p>
+            {mode === "receive" ? (
+              <button class="secondary" onClick={goSend}>
+                ← sender dashboard
+              </button>
+            ) : (
+              <span>
+                Receiving on this device? Open the QR link or paste the session
+                key below.
+              </span>
+            )}
+          </p>
+        </footer>
+      )}
     </div>
   );
 }

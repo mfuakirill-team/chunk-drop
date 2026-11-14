@@ -288,13 +288,15 @@ icon on the phone's home screen that opens ChunkDrop full-screen, like
 a native app. Nothing is downloaded from an app store; the phone
 fetches the app from the engine the first time.
 
-> **The 404 note (M0.2):** `GET /api/peers → 404` from a phone means an
-> **old binary** — pre-M0.1 engines had no `/api/peers` route. Every
-> route exists in current builds (a *wrong key* would say `401`, not
-> `404`). Rebuild/redeploy the engine (`make engine` /
-> `docker compose up -d --build`) and the dashboard works on any
-> device. Note the dashboard's pick buttons open dialogs **on the engine
-> machine** — by design (§4.1); phones use the receive page via QR.
+> **The 404 note:** a `404` on `/api/peers` from a phone is **normal**
+> — the dashboard is local-only by default (SECURITY.md §2), so other
+> devices get the generic `404` there even with the group key. Phones
+> use the receive page (`/r/` QR links) and never need the dashboard;
+> the receive link shows no "back to sender dashboard" button for that
+> reason. Receiving is unaffected, and so are the public static assets
+> (`/assets/*`, `/icons/*`). A `404` on a *receive* page means an old
+> engine binary: rebuild/redeploy (`make engine` /
+> `docker compose up -d --build`).
 
 ### Android (Chrome, Chromium, Firefox)
 

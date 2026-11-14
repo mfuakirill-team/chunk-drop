@@ -21,7 +21,9 @@ import { humanBytes, fmtPct } from "./util";
 
 interface Props {
   sessionKey: string;
-  onBack: () => void;
+  // Absent on the standalone receive link (/r/): there is no reachable
+  // dashboard on the receiving device, so no "back" affordance.
+  onBack?: () => void;
 }
 
 type Phase = "idle" | "saving" | "done" | "error" | "cancelled";
@@ -157,9 +159,11 @@ export function ReceivePage({ sessionKey, onBack }: Props) {
       <div class="card">
         <h2>Cannot receive</h2>
         <p class="error">{err}</p>
-        <button class="secondary" onClick={onBack}>
-          ← back
-        </button>
+        {onBack && (
+          <button class="secondary" onClick={onBack}>
+            ← back
+          </button>
+        )}
       </div>
     );
   }
