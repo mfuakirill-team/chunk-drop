@@ -44,8 +44,10 @@ func NewServer(sm *session.Manager, ui http.Handler) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// The receive web app (embedded web/dist).
-	mux.Handle("/r/", s.uiHandler())
+	// The web app (embedded web/dist): sender dashboard at /,
+	// receive page at /r/ (one page, two modes — app.tsx).
+	mux.Handle("/", s.uiHandler(false))
+	mux.Handle("/r/", s.uiHandler(true))
 
 	// Authenticated receiver endpoints (PROTOCOL.md §4).
 	mux.HandleFunc("GET /api/manifest", s.auth(s.handleManifest))
@@ -61,14 +63,19 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// uiHandler serves the embedded web app under /r/. The page itself is
-// public — the session key lives in the URL *fragment* and only ever
-// appears on API calls as a header (PROTOCOL.md §2).
-func (s *Server) uiHandler() http.Handler {
+// uiHandler serves the embedded web app. strip selects the /r/ mount
+// (receive links), where the prefix is removed so index.html resolves.
+// The page itself is public — the session key lives in the URL
+// *fragment* and only ever appears on API calls as a header
+// (PROTOCOL.md §2).
+func (s *Server) uiHandler(strip bool) http.Handler {
 	if s.UI == nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "web app not embedded (build web/dist first)", http.StatusNotFound)
 		})
 	}
-	return http.StripPrefix("/r/", s.UI)
+	if strip {
+		return http.StripPrefix("/r/", s.UI)
+	}
+	return s.UI
 }

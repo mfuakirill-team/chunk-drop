@@ -178,6 +178,40 @@ func TestCancel(t *testing.T) {
 	}
 }
 
+// UI mounting: dashboard at /, receive page under /r/ (prefix
+// stripped), API routes unaffected. Regression for the single-mount
+// bug where the dashboard URL printed in the banner served 404.
+func TestUIMounts(t *testing.T) {
+	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "path="+r.URL.Path)
+	})
+	srv := NewServer(session.NewManager(), stub)
+	h := srv.Handler()
+
+	if rec := get(t, h, "/", ""); rec.Code != http.StatusOK ||
+		rec.Body.String() != "path=/" {
+		t.Errorf("GET / = %d %q, want 200 \"path=/\"", rec.Code, rec.Body.String())
+	}
+	if rec := get(t, h, "/r/", ""); rec.Code != http.StatusOK ||
+		rec.Body.String() != "path=" {
+		t.Errorf("GET /r/ = %d %q, want 200 \"path=\" (empty; FileServerFS treats \"\" as \"/\" → index.html)",
+			rec.Code, rec.Body.String())
+	}
+	if rec := get(t, h, "/r/assets/app.js", ""); rec.Code != http.StatusOK ||
+		rec.Body.String() != "path=assets/app.js" {
+		t.Errorf("GET /r/assets/app.js = %d %q", rec.Code, rec.Body.String())
+	}
+	// API routes must keep priority over the catch-all "/" UI mount.
+	if rec := get(t, h, "/api/manifest", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /api/manifest (no key) = %d, want 401", rec.Code)
+	}
+	// Nil UI → explicit 404, not a panic.
+	nilUI := NewServer(session.NewManager(), nil).Handler()
+	if rec := get(t, nilUI, "/", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("GET / with nil UI = %d, want 404", rec.Code)
+	}
+}
+
 func TestStartRequiresGroupKey(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()

@@ -181,7 +181,7 @@ func run(portFlag int, bindFlag string) error {
 	fmt.Println()
 	fmt.Printf("  ChunkDrop engine ready\n")
 	fmt.Printf("  dashboard:  %s\n", url)
-	fmt.Printf("  receive:    %sr/#k=<session-key>\n", strings.TrimSuffix(url, "/"))
+	fmt.Printf("  receive:    %sr/#k=<session-key>\n", url)
 	if len(candidates) > 1 {
 		fmt.Printf("  (%d LAN interfaces seen — use -bind to pin one)\n", len(candidates))
 	}
