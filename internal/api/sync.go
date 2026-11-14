@@ -1,9 +1,13 @@
 package api
 
 import (
+	"fmt"
 	"net"
 	"net/http"
+	"strings"
+	"time"
 
+	"chunkdrop/internal/activity"
 	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/transfer"
 )
@@ -101,6 +105,7 @@ func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"sync start failed"}`, http.StatusBadRequest)
 		return
 	}
+	s.Activity.Add(activity.KindUp, fmt.Sprintf("serving %q to peer %s", strings.Join(body.Rels, ", "), r.RemoteAddr))
 	writeJSON(w, http.StatusOK, syncStartResponse{
 		SessionID: sess.ID,
 		Key:       sess.KeyEncoded,
@@ -131,6 +136,51 @@ type syncStartResponse struct {
 	SessionID string             `json:"sessionId"`
 	Key       string             `json:"key"`
 	Manifest  *transfer.Manifest `json:"manifest"`
+}
+
+// handleActivity serves the concise activity feed (#1.3): what is
+// uploading (live sessions serving receivers), what downloaded or was
+// deleted (sync mesh), what failed. Ring buffer, RAM-only.
+func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	events := s.Activity.List()
+	if events == nil {
+		events = []activity.Event{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events":  events,
+		"uploads": s.liveUploads(),
+	})
+}
+
+// uploadInfo summarizes one currently-served session for the feed.
+type uploadInfo struct {
+	Session  string         `json:"session"`
+	Files    int            `json:"files"`
+	Bytes    int64          `json:"bytes"`
+	Receiver string         `json:"receiver,omitempty"`
+	Have     map[string]any `json:"have,omitempty"`
+	Since    string         `json:"since"`
+}
+
+func (s *Server) liveUploads() []uploadInfo {
+	if s.Sessions == nil {
+		return []uploadInfo{}
+	}
+	out := []uploadInfo{}
+	for _, sess := range s.Sessions.ByKeyAll() {
+		u := uploadInfo{
+			Session: sess.ID,
+			Files:   len(sess.Manifest.Files),
+			Bytes:   sess.Manifest.TotalSize(),
+			Since:   sess.CreatedAt.UTC().Format(time.RFC3339),
+		}
+		if sess.HasProgress() {
+			u.Receiver = sess.Progress.Receiver
+			u.Have = sess.Progress.Have
+		}
+		out = append(out, u)
+	}
+	return out
 }
 
 func localIP() string {

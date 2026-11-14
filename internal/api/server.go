@@ -8,6 +8,7 @@ package api
 import (
 	"net/http"
 
+	"chunkdrop/internal/activity"
 	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
@@ -54,6 +55,11 @@ type Server struct {
 
 	// SyncStart registers a sync serving session (#6 pull side).
 	SyncStart func(*syncmesh.Session) error
+
+	// Activity is the concise feed for the dashboard status panel
+	// (#1.3): uploads (serving), downloads (sync), deletes, errors.
+	// Nil = events are dropped (callers need no guards).
+	Activity *activity.Log
 }
 
 // Picker abstracts the native dialog surface (internal/picker).
@@ -103,6 +109,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/peers", s.authStart(s.handlePeers))
 	mux.HandleFunc("GET /api/sync/state", s.authStart(s.handleSyncState))
 	mux.HandleFunc("POST /api/sync/start", s.authStart(s.handleSyncStart))
+
+	// Activity feed (#1.3): concise what's-uploading/downloading lines.
+	// Same group-key gate as its siblings (it names local files).
+	mux.HandleFunc("GET /api/activity", s.authStart(s.handleActivity))
 
 	return mux
 }

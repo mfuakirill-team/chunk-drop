@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"chunkdrop/internal/activity"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/transfer"
 )
@@ -65,12 +66,14 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.SetProgress(p)
+	s.Activity.Add(activity.KindUp, fmt.Sprintf("%s receiving %q — %s", p.Receiver, sess.Manifest.Files[0].Path, humanCount(p.Have)))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleCancel closes the session (receiver-initiated, idempotent).
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	sess := fromSession(r)
+	s.Activity.Add(activity.KindInfo, fmt.Sprintf("session %s cancelled by receiver", sess.ID))
 	_ = s.Sessions.Cancel(sess.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -119,11 +122,30 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"session create"}`, http.StatusInternalServerError)
 		return
 	}
+	total := m.TotalSize()
+	s.Activity.Add(activity.KindUp, fmt.Sprintf("session started: %d file(s), %s — waiting for receiver", len(m.Files), humanBytes(total)))
 	writeJSON(w, http.StatusOK, startResponse{
 		SessionID: sess.ID,
 		Key:       session.KeyEncoding(sess.Key),
 		Manifest:  m,
 	})
+}
+
+// humanBytes renders a size for activity lines (1.5 MB style).
+func humanBytes(n int64) string {
+	const k = 1024
+	switch {
+	case n >= k*k*k*k*k:
+		return fmt.Sprintf("%.1f TB", float64(n)/(k*k*k*k*k))
+	case n >= k*k*k*k:
+		return fmt.Sprintf("%.1f GB", float64(n)/(k*k*k*k))
+	case n >= k*k*k:
+		return fmt.Sprintf("%.1f MB", float64(n)/(k*k*k))
+	case n >= k*k:
+		return fmt.Sprintf("%.1f KB", float64(n)/(k*k))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 type startResponse struct {
@@ -159,4 +181,16 @@ func quoteErr(err error) string {
 
 func tempZipPath() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("chunkdrop-%d.zip", time.Now().UnixNano()))
+}
+
+// humanCount renders "N files, M chunks" from a progress bitmap.
+func humanCount(have map[string]any) string {
+	nf := len(have)
+	nc := 0
+	for _, v := range have {
+		if l, ok := v.([]any); ok {
+			nc += len(l)
+		}
+	}
+	return fmt.Sprintf("%d files, %d chunks", nf, nc)
 }

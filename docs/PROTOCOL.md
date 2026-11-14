@@ -84,6 +84,27 @@ Rules:
 Chunk size and count are validated against the manifest; unknown indices →
 `404`, session key invalid → `401`, session expired → `410`.
 
+### 4.1 Engine-side (dashboard/sync) routes — **group-key gated** (`X-ChunkDrop-Key: <group_key>`)
+
+These act on the engine's own desktop/filesystem, so they require the
+long-term **group key** (constant-time compare, fail closed when no
+key is configured). Wrong key → `401` with the same generic body.
+
+| Method & path | Purpose |
+|---|---|
+| `POST /api/start` | Create a transfer session from engine-local paths; body `{"paths":["…"],"zip":bool}` |
+| `POST /api/pick/files` | Open a native multi-file dialog **on the engine**, return chosen paths |
+| `POST /api/pick/folder` | Same, for a recursive folder pick |
+| `GET /api/peers` | LAN discovery view: `{"self":{…},"peers":[{id,name,ip,port}…]}` |
+| `GET /api/sync/state` | This engine's shared-folder announcement (rel → size/mtime/xxh) |
+| `POST /api/sync/start` | Body `{"rels":["…"]}` → session serving those files for a peer |
+| `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries]}` |
+
+The PWA surface (manifest, icons) is served from the same static web
+app (`/manifest.webmanifest`, `/icons/*`) — no service worker by
+design (offline caching is out of scope until it stops fighting the
+"engine is the source of truth" model).
+
 Receiver behavior (normative):
 - Fetch chunks **sequentially per file, 2–3 in flight** (keep phone RAM flat).
 - Verify every chunk with SHA-256 (hash-wasm) before keeping it. Hash mismatch

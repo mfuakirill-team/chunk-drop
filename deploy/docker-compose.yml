@@ -1,0 +1,29 @@
+# ChunkDrop engine in Docker.
+# Ports: 8090/tcp (HTTP UI + API), 8091/udp (LAN discovery beacons).
+# Config: engine.toml (group_key) — either mount it (read-only) or pass
+# the key via env CHUNKDROP_GROUP_KEY (see Dockerfile ENV).
+#
+# Usage: docker compose up -d --build
+services:
+  chunkdrop-engine:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: chunkdrop-engine
+    container_name: chunkdrop-engine
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+      - "8091:8091/udp"
+    volumes:
+      # read-only config; the engine writes nothing to it
+      - ~/.config/chunkdrop/engine.toml:/config/.config/chunkdrop/engine.toml:ro
+    environment:
+      - HOME=/config
+      # fallback if no engine.toml mounted:
+      # - CHUNKDROP_GROUP_KEY=<paste group key here>
+    # drop root privileges inside the container
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp

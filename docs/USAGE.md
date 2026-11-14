@@ -149,6 +149,48 @@ What the engine does while running:
 - Sessions expire after **24 h**.
 - `Ctrl+C` (or window close) = clean shutdown, cancels sessions.
 
+### 3.1 Run the engine in Docker (lightweight container)
+
+The engine ships as a small Docker image (multi-stage: Node builds the
+web app → Go embeds it → Alpine runtime, ~15 MB, non-root, read-only
+root filesystem). The M2 VPS *hub* (`docs/DEPLOY-VPS.md`) is a
+different, later thing — this runs the **engine** itself, e.g. on a
+home server or NAS that's always on.
+
+```bash
+# once: create the config with a fresh group key
+mkdir -p ~/.config/chunkdrop
+echo 'group_key = "'"$(docker run --rm chunkdrop-engine keygen)"'"' \
+  > ~/.config/chunkdrop/engine.toml
+# (or: engine keygen from a plain binary)
+
+docker compose -f deploy/docker-compose.yml up -d --build
+# UI:    http://<engine-ip>:8090/
+# logs:  docker logs -f chunkdrop-engine
+```
+
+Ports: **8090/tcp** (dashboard + chunk API) and **8091/udp** (LAN
+discovery beacons). The container reads the config read-only from
+`~/.config/chunkdrop/engine.toml`; alternatively pass the key as an
+env var (no config file at all):
+
+```yaml
+environment:
+  - CHUNKDROP_GROUP_KEY=<paste group key here>
+```
+
+Caveats specific to Docker:
+
+- **QR links advertise the container's LAN IP** — with
+  `network_mode: host` (or `-net=host`) the engine sees the real LAN
+  and QRs work as on a bare-metal host; with the default bridge you
+  may need `bind_ip = "<host LAN ip>"` in the config (§5.4).
+- The engine writes **nothing** outside RAM (sessions) and the config
+  file, so no other volumes are needed. The sync folder
+  (`~/Downloads/chunk-drop-files`, M0.1) is *not* mounted in the
+  container by default — mount it if you want container↔container
+  sync: `- ~/Downloads/chunk-drop-files:/config/Downloads/chunk-drop-files`.
+
 ---
 
 ## 4. Send → receive walkthrough
@@ -158,13 +200,16 @@ What the engine does while running:
 1. Open the **dashboard** URL from the startup banner in a desktop browser.
    (Chrome/Edge/Firefox — any modern one.)
 2. **Pick files…** (multi-select) or **Pick folder…** (recursive walk).
+   - Selected paths appear in their own **frame** (blue border) with a
+     **Reset selection** button — obvious what's about to be sent.
    - "pack many small files as store-mode ZIP" is optional; for folders
      it can be handy on phones (one file to save instead of a tree).
      It's a ZIP with **no compression** (store mode) — near-instant pack.
 3. **Start transfer** → the engine hashes chunks on the fly (SHA-256 per
-   4 MiB chunk) → a **QR code** appears.
-4. Below the QR: **Copy link** (fallback) and receiver progress (live %,
-   polled from the phone).
+   4 MiB chunk) → a **QR code** appears. **Cancel** (right of Start)
+   ends the session.
+4. Below the QR: **Copy link** (fallback). Live receiver progress moved
+   to the **LAN clients / Activity** panel on the right (§4.1.1).
 
 ### 4.2 On the receiving device
 
@@ -187,12 +232,27 @@ subnet). Nothing installed, no account, no app.
 button): works, but saving needs a desktop browser with the File System
 Access API (Chrome/Edge/Chromium on Windows/Linux).
 
+### 4.2.1 The Activity panel (sender side)
+
+The right-hand **LAN clients** card shows, below the peer table:
+
+- **Activity** — a concise feed of what's happening: ▲ uploading
+  (sessions started, receiver progress), ▼ downloading (sync folder
+  pulls from other engines), • info, ! errors. Newest on top, last 12
+  lines, refreshed every 3 s.
+- **Live receiver progress** of your running transfer (which files the
+  phone already has) — moved here from the sender card (M0.2).
+
+Both panels are read-only views; nothing here changes transfer state.
+
 ### 4.3 Cancel / stop / close mid-transfer
 
 - Receiver: **Cancel transfer** → session ends, sender sees it. Nothing
   corrupts on the phone (partial files are discarded).
+- Sender: **Cancel** (next to **Start transfer**) ends the current
+  session immediately — same effect as the receiver cancelling.
 - Sender: closing the dashboard tab is fine (chunks are served by the
-  engine, not the tab). To end a session, `Ctrl+C` the engine.
+  engine, not the tab). To end everything, `Ctrl+C` the engine.
 - **Resume-after-close** (closing the phone tab mid-transfer, reopening
   the same link) is deliberately **M3** — in M0 the receiver restarts the
   *chunks*, not from scratch: it skips nothing (fresh session), so a
@@ -209,7 +269,68 @@ receiver hashes the bytes itself and compares both.
 
 ---
 
-## 5. Troubleshooting
+## 4.9 Install as an app (PWA) on the phone
+
+The receiver page is an installable **PWA** (Add to Home Screen) — an
+icon on the phone's home screen that opens ChunkDrop full-screen, like
+a native app. Nothing is downloaded from an app store; the phone
+fetches the app from the engine the first time.
+
+> **The 404 note (M0.2):** `GET /api/peers → 404` from a phone means an
+> **old binary** — pre-M0.1 engines had no `/api/peers` route. Every
+> route exists in current builds (a *wrong key* would say `401`, not
+> `404`). Rebuild/redeploy the engine (`make engine` /
+> `docker compose up -d --build`) and the dashboard works on any
+> device. Note the dashboard's pick buttons open dialogs **on the engine
+> machine** — by design (§4.1); phones use the receive page via QR.
+
+### Android (Chrome, Chromium, Firefox)
+
+1. Phone on the **same Wi-Fi** as the engine; open the engine URL
+   (`http://<engine-ip>:8090/`) — any page of it works (dashboard or
+   a receive link).
+2. Menu **⋮ → Add to Home screen / Install app** → confirm.
+   - Chrome shows a native install banner on second visit.
+3. The icon (blue chunk-arrow) appears with the app name — launch
+   opens it standalone, no browser bars.
+
+### iOS/iPadOS (Safari — required for installs)
+
+1. Open the engine URL in **Safari** (PWA install only works from
+   Safari; the page itself runs fine in any browser).
+2. **Share button → Add to Home Screen → Add**.
+3. Launch from the home screen — standalone, full screen.
+
+### What the installed app does
+
+- Opens the dashboard (or last page) at engine quality — manifest
+  view, chunked download with SHA-256 verify, retries.
+- **No offline mode**: it's a LAN tool; without the engine reachable
+  it shows the connection error. (Caching/offline is not a goal — see
+  `docs/PLAN.md`.)
+- Update = reload the page; the engine always serves the newest
+  embedded build.
+
+### PWA tech notes (for the curious)
+
+- Manifest: `web/public/manifest.webmanifest` — name, standalone
+  display, 192/512 PNG icons + maskable variants, `theme_color`.
+- Icons: generated by `go run ./scripts/genicons` → `web/public/icons/`
+  (reproducible, no binary assets in git).
+- **No service worker (deliberate)**: install prompts work without one
+  on Android Chrome and iOS Safari; a SW would add offline caching
+  complexity that fights the "engine is the source of truth" model.
+  If install prompts misbehave on some Chromium build later, a
+  minimal cache-first-on-static SW is the fallback plan.
+
+### 5.0 "404" on `/api/peers` (or any dashboard API) from a device
+
+You're talking to an **old engine binary**. All dashboard routes
+(`/api/peers`, `/api/activity`, `/api/sync/*`, `/api/pick/*`) shipped
+in M0.1–M0.2; a `404` means the route doesn't exist there. A wrong
+*key* answers `401`, never `404`. Fix: rebuild and restart the engine,
+and hard-refresh the page (`Ctrl+Shift+R`) to drop the cached old web
+app. In Docker: `docker compose -f deploy/docker-compose.yml up -d --build`.
 
 ### 5.1 "Receiver's browser says it can't reach / connection refused"
 
@@ -345,10 +466,18 @@ browser, and the exact step from this guide.
 |---|---|
 | LAN send: files/folder → QR → browser save | ✅ M0 |
 | Store-mode ZIP packing (many small files) | ✅ M0 |
-| Session keys, 24 h expiry, cancel | ✅ M0 |
+| Session keys, 24 h expiry, cancel (sender **and** receiver) | ✅ M0/M0.2 |
+| Native pick dialogs on the engine (dashboard remote control) | ✅ M0.1 |
+| LAN discovery + peers panel (who's online) | ✅ M0.1 |
+| Sync folder `~/Downloads/chunk-drop-files` (PC↔PC) | ✅ M0.1 |
+| Dashboard: selection frame + Reset, Cancel, Activity feed | ✅ M0.2 |
+| PWA install (iOS Safari, Android Chrome/Firefox) | ✅ M0.2 |
+| Engine in Docker (deploy/) | ✅ M0.2 |
 | Upload direction (phone → PC) | ⬜ M1 |
 | Internet mode via VPS hub | ⬜ M2 |
 | Resume-after-close for receivers | ⬜ M3 |
+| Real-device test matrix (iPhone/Android/Windows engines) | ⬜ needs hardware |
+| Service worker / offline caching | ⬜ deliberately none (§4.9) |
 
 See `docs/PLAN.md` §3 for the full roadmap and `docs/M0-TASKS.md` for
 the build checklist this release passed.

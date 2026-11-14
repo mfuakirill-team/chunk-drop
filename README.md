@@ -42,13 +42,19 @@ It prints the dashboard URL (`http://<lan-ip>:8090/`):
 
 1. Open that URL in a browser on the sending machine.
 2. Paste the group key once (the browser remembers it).
-3. **Pick files…** → **Start transfer** → a QR code appears.
+3. **Pick files…** → selection shows in its own frame → **Start transfer**
+   → a QR code appears (**Cancel** ends it any time).
 4. On the phone, scan the QR (or open the link / "Copy link").
 5. The phone shows the file list → **Save all…** → done.
+   (Phones can also install the page as an app: "Add to Home Screen"
+   — see `docs/USAGE.md` §4.9.)
 
 4 GB or 400 small files — same flow; a dropped Wi-Fi moment resumes,
 nothing is ever uploaded to a server. All options, browser differences,
 firewall/unboxing troubleshooting: **`docs/USAGE.md`**.
+
+Prefer running the engine in Docker (home server / NAS)? `deploy/`
+has a lightweight image + compose file — `docs/USAGE.md` §3.1.
 
 ## Why
 

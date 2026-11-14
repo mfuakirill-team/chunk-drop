@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"chunkdrop/internal/activity"
 	"chunkdrop/internal/transfer"
 
 	"github.com/cespare/xxhash/v2"
@@ -510,6 +511,8 @@ type PeerRef struct {
 type Puller struct {
 	GroupKey string
 	Logf     func(string, ...any)
+	// Act receives concise activity events (nil = disabled).
+	Act *activity.Log
 }
 
 // State fetches a peer's announcement (GET /api/sync/state).
@@ -672,6 +675,11 @@ func (p *Puller) Pull(l *Local, n *Needed, peers []PeerRef) error {
 	if p.Logf != nil {
 		p.Logf("sync: pulled %s (%d B) from %d peer(s)", n.Rel, n.Size, len(swarm))
 	}
+	names := make([]string, len(swarm))
+	for i, pe := range swarm {
+		names[i] = pe.Name
+	}
+	p.Act.Add(activity.KindDown, fmt.Sprintf("downloaded %s (%s) from %s", n.Rel, humanBytes(n.Size), strings.Join(names, ", ")))
 	return nil
 }
 
@@ -712,6 +720,23 @@ func NeededRels(plan map[string]*Needed) []string {
 	return out
 }
 
+// humanBytes renders a size for activity lines (1.5 MB style).
+func humanBytes(n int64) string {
+	const k = 1024
+	switch {
+	case n >= k*k*k*k*k: // TiB is plenty for a private LAN
+		return fmt.Sprintf("%.1f TB", float64(n)/(k*k*k*k*k))
+	case n >= k*k*k*k:
+		return fmt.Sprintf("%.1f GB", float64(n)/(k*k*k*k))
+	case n >= k*k*k:
+		return fmt.Sprintf("%.1f MB", float64(n)/(k*k*k))
+	case n >= k*k:
+		return fmt.Sprintf("%.1f KB", float64(n)/(k*k))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Runner — the auto-transfer loop (#6): rescan, fetch every peer's
 // announcement, compute the plan, pull from swarms, propagate deletes.
@@ -724,6 +749,8 @@ type Runner struct {
 	GroupKey string
 	Peers    func() []PeerRef // discovered peers (host:port + engine id)
 	Logf     func(string, ...any)
+	// Act receives concise activity events (nil = disabled).
+	Act *activity.Log
 }
 
 // SyncOnce runs one full planning + pull + delete-propagation pass.
@@ -742,6 +769,7 @@ func (r *Runner) SyncOnce() error {
 		a, err := r.Puller.State(pe)
 		if err != nil {
 			r.logf("sync: peer %s: %v", pe.Name, err)
+			r.Act.Add(activity.KindError, fmt.Sprintf("peer %s unreachable: %v", pe.Name, err))
 			continue
 		}
 		anns = append(anns, a)
@@ -768,12 +796,14 @@ func (r *Runner) SyncOnce() error {
 		}
 		if err := r.Puller.Pull(r.Local, n, swarm); err != nil {
 			r.logf("sync: pull %s: %v", rel, err)
+			r.Act.Add(activity.KindError, fmt.Sprintf("pull %s failed: %v", rel, err))
 		}
 	}
 	// 3. Delete propagation (files no peer announces, past grace).
 	for _, rel := range Deletions(r.Local.Files(), anns) {
 		r.Local.DeleteLocal(rel)
 		r.logf("sync: deleted %s (deleted on a peer)", rel)
+		r.Act.Add(activity.KindDown, fmt.Sprintf("deleted %s (deleted on a peer)", rel))
 	}
 	return nil
 }

@@ -93,7 +93,29 @@ td.num, th.num { text-align: right; white-space: nowrap; }
 }
 .bar > div { height: 100%; background: var(--accent); transition: width 0.2s; }
 
-canvas.qr { image-renderacing: pixelated; border-radius: 8px; }
+/* #1.1: selected-paths frame — visibly "something is selected". */
+.selbox {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.selbox-on {
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--card));
+}
+ul.sellist { margin: 0; padding-left: 18px; font-size: 13px; }
+
+/* #1.3: activity list in the side panel. */
+ul.act { list-style: none; padding-left: 0; margin: 4px 0; font-size: 13px; }
+ul.act li { padding: 2px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.actk { font-weight: 700; width: 1em; display: inline-block; }
+.actk-up { color: var(--accent); }
+.actk-down { color: var(--ok); }
+.actk-info { color: var(--muted, #888); }
+.actk-error { color: var(--error); }
+
+canvas.qr { image-rendering: pixelated; border-radius: 8px; }
 
 ul.tree { list-style: none; padding-left: 0; }
 ul.tree ul { padding-left: 18px; }

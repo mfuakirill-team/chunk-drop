@@ -3,7 +3,9 @@ import { useEffect, useRef, useState } from "preact/hooks";
 // Sender dashboard (M0-TASKS.md step 8): file/folder picker, QR with
 // the receive URL, copy-link fallback, live receiver progress polled
 // from /api/session. Pick runs a native dialog on the engine (#1);
-// the group key persists in localStorage (#2).
+// the group key persists in localStorage (#2). M0.2: selected paths
+// sit in their own frame with a Reset button; Cancel sits next to
+// Start; activity/progress live in the side panel (PeersPanel).
 
 import { KEY_HEADER, type SessionInfo } from "./api";
 import { buildReceiveUrl } from "./link";
@@ -19,11 +21,18 @@ interface StartResponse {
   };
 }
 
-interface Props {
-  onStart: (sessionKey: string) => void;
+export interface SendState {
+  started: StartResponse | null;
+  sessionInfo: SessionInfo | null;
+  cancel: () => void;
 }
 
-export function SendPage({ onStart }: Props) {
+interface Props {
+  onStart: (sessionKey: string) => void;
+  onChange: (st: SendState | null) => void;
+}
+
+export function SendPage({ onStart, onChange }: Props) {
   const [paths, setPaths] = useState<string[]>([]);
   const [zip, setZip] = useState(false);
   // #2: persisted group key; #3: plain input, not a password field.
@@ -48,7 +57,7 @@ export function SendPage({ onStart }: Props) {
     if (canvas) void renderQr(canvas, url).catch(() => {});
   }, [started]);
 
-  // Poll receiver progress (live % for the sender).
+  // Poll receiver progress (live % for the sender) → activity panel.
   useEffect(() => {
     if (!started) return;
     const t = setInterval(async () => {
@@ -61,6 +70,20 @@ export function SendPage({ onStart }: Props) {
     }, 2000);
     return () => clearInterval(t);
   }, [started]);
+
+  // Expose started/progress/cancel to the side panel (#1.3).
+  const cancel = () => {
+    if (!started) return;
+    void fetch("/api/cancel", {
+      method: "POST",
+      headers: { [KEY_HEADER]: started.key },
+    }).catch(() => {});
+    setStarted(null);
+    setSessionInfo(null);
+  };
+  useEffect(() => {
+    onChange(started ? { started, sessionInfo, cancel } : null);
+  }, [started, sessionInfo]);
 
   // #1: native dialog on the engine machine — browsers cannot hand
   // the server real paths (that was the "stat README.md" bug: the
@@ -94,6 +117,12 @@ export function SendPage({ onStart }: Props) {
       setPaths(list);
       setManualPaths("");
     }
+  };
+
+  const reset = () => {
+    setPaths([]);
+    setZip(false);
+    setErr("");
   };
 
   const start = async () => {
@@ -163,17 +192,35 @@ export function SendPage({ onStart }: Props) {
             Use pasted paths
           </button>
         </p>
-        {paths.length > 0 && (
-          <p class="muted">
-            {paths.length} path{paths.length === 1 ? "" : "s"} selected
-            {zip ? " → will be packed into bundle.zip (store mode)" : ""}
-            <br />
-            {paths.slice(0, 5).map((p) => (
-              <div style={{ overflowWrap: "anywhere" }}>{p}</div>
-            ))}
-            {paths.length > 5 ? `… +${paths.length - 5} more` : ""}
-          </p>
-        )}
+
+        {/* #1.1: selected paths get their own frame + Reset. */}
+        <div class={"selbox" + (paths.length > 0 ? " selbox-on" : "")}>
+          {paths.length === 0 ? (
+            <p class="muted" style="margin:0">
+              Nothing selected yet.
+            </p>
+          ) : (
+            <div>
+              <p style="margin:0 0 6px">
+                <strong>
+                  {paths.length} path{paths.length === 1 ? "" : "s"} selected
+                </strong>
+                {zip ? " → bundle.zip (store mode)" : ""}
+                {" "}
+                <button class="secondary" style="padding:2px 10px" onClick={reset}>
+                  Reset selection
+                </button>
+              </p>
+              <ul class="sellist">
+                {paths.slice(0, 12).map((p) => (
+                  <li style={{ overflowWrap: "anywhere" }}>{p}</li>
+                ))}
+                {paths.length > 12 ? <li class="muted">… +{paths.length - 12} more</li> : ""}
+              </ul>
+            </div>
+          )}
+        </div>
+
         <p>
           <input
             type="text"
@@ -183,9 +230,15 @@ export function SendPage({ onStart }: Props) {
           />
         </p>
         <p>
-          <button disabled={busy} onClick={start}>
+          <button disabled={busy || !!started} onClick={start}>
             {busy ? "Hashing…" : "Start transfer"}
-          </button>
+          </button>{" "}
+          {/* #1.2: Cancel alongside Start (right side). */}
+          {started && (
+            <button class="secondary" onClick={cancel}>
+              Cancel
+            </button>
+          )}
           {err && <span class="error"> {err}</span>}
         </p>
       </div>
@@ -208,37 +261,6 @@ export function SendPage({ onStart }: Props) {
           <p class="muted" style={{ overflowWrap: "anywhere" }}>
             {receiveUrl}
           </p>
-        </div>
-      )}
-
-      {started && (
-        <div class="card">
-          <h3 style="margin-top:0">Receiver progress</h3>
-          {sessionInfo?.receiver ? (
-            <div>
-              <p class="muted">{sessionInfo.receiver.receiver} — live</p>
-              <table>
-                <thead>
-                  <tr>
-                    <th>file</th>
-                    <th class="num">have</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(sessionInfo.receiver.have).map(([f, chunks]) => (
-                    <tr>
-                      <td>{started.manifest.files[Number(f)]?.path ?? f}</td>
-                      <td class="num">
-                        {(chunks as number[]).length}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p class="muted">Waiting for the first receiver…</p>
-          )}
         </div>
       )}
     </div>

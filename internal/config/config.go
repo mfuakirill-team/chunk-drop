@@ -17,6 +17,11 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// DefaultGroupKeyEnv lets Docker/other env-based setups pass the group
+// key without mounting a config file (deploy/Dockerfile): the engine
+// reads it as a fallback when the config file has no key.
+const DefaultGroupKeyEnv = "CHUNKDROP_GROUP_KEY"
+
 // Defaults for the engine config.
 const (
 	DefaultPort    = 8090
@@ -83,6 +88,12 @@ func Load() (Config, string, error) {
 	}
 	if cfg.MaxUploadBytes == 0 {
 		cfg.MaxUploadBytes = 100 << 30
+	}
+	// Env fallback (Docker): a key in the environment beats "no key yet".
+	if cfg.GroupKey == "" || strings.Contains(cfg.GroupKey, "<paste") {
+		if k := strings.TrimSpace(os.Getenv(DefaultGroupKeyEnv)); k != "" {
+			cfg.GroupKey = k
+		}
 	}
 	return cfg, path, nil
 }

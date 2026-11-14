@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"chunkdrop/internal/activity"
 	"chunkdrop/internal/api"
 	"chunkdrop/internal/config"
 	"chunkdrop/internal/discovery"
@@ -83,6 +84,8 @@ Config: ~/.config/chunkdrop/engine.toml (Linux)
 `)
 }
 
+// Package main wiring note (#1.3): one shared activity feed drives both
+// the dashboard status panel and engine console lines.
 func run(portFlag int, bindFlag string) error {
 	cfg, cfgPath, err := config.Load()
 	if err != nil {
@@ -132,12 +135,17 @@ func run(portFlag int, bindFlag string) error {
 		}
 	}
 
+	// #1.3: the shared activity feed (RAM ring buffer) — sessions,
+	// sync pulls/deletes, errors all land here.
+	act := activity.NewLog(200)
+
 	// HTTP server wiring.
 	sm := session.NewManager()
 	ui := webui.Handler()
 	srv := api.NewServer(sm, ui)
 	srv.GroupKey = cfg.GroupKey
 	srv.Picker = pickerAdapters{}
+	srv.Activity = act // #1.3: concise feed → dashboard status panel
 
 	// LAN discovery (#5/#7): UDP broadcast beacons authenticated by
 	// an HMAC of the group key; inactive when no key is configured.
@@ -148,7 +156,6 @@ func run(portFlag int, bindFlag string) error {
 	// Shared-folder auto-transfer (#6): only when a key is configured
 	// (the mesh is group-key gated — syncmesh never trusts strangers).
 	var syncStop = make(chan struct{})
-	var syncRunner *syncmesh.Runner
 	if cfg.GroupKey != "" && !strings.Contains(cfg.GroupKey, "<paste") {
 		dir, err := syncmesh.SyncDir()
 		if err != nil {
@@ -160,8 +167,9 @@ func run(portFlag int, bindFlag string) error {
 				log.Printf("sync scan failed: %v", err)
 			} else {
 				srv.Sync = local
-				puller := &syncmesh.Puller{GroupKey: cfg.GroupKey, Logf: log.Printf}
-				syncRunner = &syncmesh.Runner{
+				act.Add(activity.KindInfo, "sync folder: "+dir)
+				puller := &syncmesh.Puller{GroupKey: cfg.GroupKey, Logf: log.Printf, Act: act}
+				syncRunner := &syncmesh.Runner{
 					Local:    local,
 					Puller:   puller,
 					GroupKey: cfg.GroupKey,
@@ -180,6 +188,7 @@ func run(portFlag int, bindFlag string) error {
 						return out
 					},
 					Logf: log.Printf,
+					Act:  act,
 				}
 				go syncRunner.Run(syncStop)
 			}
