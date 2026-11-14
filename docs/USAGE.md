@@ -415,6 +415,19 @@ the excluded `hashes/tmp/` folder and are invisible to sync everywhere
 sitting in `chunk-drop-files/` from the old build are plain junk — the
 engine ignores them; delete them by hand whenever you like.
 
+### 5.10 "I deleted it, and it came back" (older build)
+
+Deleting a file in the sync folder is supposed to remove it on **every**
+engine. Older builds had a livelock: the deleting engine saw the file
+still announced by a peer (which keeps announcing for up to 2 min while
+its own delete grace runs), instantly re-downloaded it, and re-announcing
+reset the peer's timer — so the deletion *never* propagated. Fixed with
+persisted tombstones: a locally deleted file is never re-pulled until
+the deletion has propagated to all reachable peers (~2 min), survives
+engine restarts, and a genuinely newer remote edit (mtime after the
+deletion) still wins. Engines older than this fix can still undo
+deletions — update all machines.
+
 ---
 
 ## 6. What's safe / what to keep private

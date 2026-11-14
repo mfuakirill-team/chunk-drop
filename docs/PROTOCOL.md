@@ -107,6 +107,18 @@ Sync normative details:
   rels ending in `.part` (or inside `hashes/`) are skipped by scan and
   pull planning — so peers can never pull each other's partial
   downloads back.
+- **Local deletions propagate; they are never undone by stale
+  announcements.** When a known file disappears from the sync folder,
+  the engine records a tombstone (persisted in
+  `hashes/cache.json` → `vanished`, kept 30 days) and refuses to
+  re-pull that rel while any peer still announces it — otherwise the
+  deleter would instantly re-download the file from a peer still inside
+  its own delete grace, and the deletion would never propagate.
+  A remote mtime **newer** than the vanish time beats the tombstone
+  (the file was genuinely edited/re-created elsewhere after our
+  deletion). Re-adding the file locally clears the tombstone. Deletion
+  reaches every reachable peer within `DeleteGrace` (2 min) of
+  consistent absence from announcements.
 
 The PWA surface (manifest, icons) is served from the same static web
 app (`/manifest.webmanifest`, `/icons/*`) — no service worker by

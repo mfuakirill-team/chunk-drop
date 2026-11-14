@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,5 +345,130 @@ func assertNoParts(t *testing.T, syncDir string) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The deletion resurrection livelock: user deletes a file here, but a
+// peer still inside its own delete grace keeps announcing it, so the
+// planner re-pulled it within seconds — undoing the deletion, and the
+// user's next deletion started the loop again. Tombstones (persisted
+// vanish records) must block re-pulling until the deletion has
+// propagated, while a genuinely newer remote edit still syncs.
+func TestDeleteTombstones(t *testing.T) {
+	l, dir := testLocal(t, map[string]string{"a.txt": "v1"})
+	oldMtime := l.Files()["a.txt"].Mtime
+
+	// User deletes the file → next scan records the tombstone.
+	if err := os.Remove(filepath.Join(dir, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	vt, ok := l.VanishedTime("a.txt")
+	if !ok {
+		t.Fatal("vanish not recorded")
+	}
+	// Tombstone survives an engine restart (persisted in cache.json).
+	l2, _ := NewLocal(dir, "x", "e")
+	if vt2, ok := l2.VanishedTime("a.txt"); !ok || !vt2.Equal(vt) {
+		t.Fatalf("tombstone lost on restart: %v %v", vt2, ok)
+	}
+
+	// A peer still announcing the deleted file must NOT resurrect it.
+	ann := &Announcement{Engine: "e2", Name: "n2", Files: map[string]*FileMeta{
+		"a.txt": {Size: 2, Mtime: oldMtime, Xxh: 1},
+	}}
+	plan := ComputeNeeded(l.Files(), []*Announcement{ann})
+	filterTombstoned(l, plan)
+	if len(plan) != 0 {
+		t.Fatalf("tombstoned file planned for re-pull: %v", plan)
+	}
+
+	// A remote edit newer than our deletion is a new version: it wins.
+	live := &Announcement{Engine: "e2", Name: "n2", Files: map[string]*FileMeta{
+		"a.txt": {Size: 9, Mtime: time.Now().Add(time.Hour), Xxh: 7},
+	}}
+	plan2 := ComputeNeeded(l.Files(), []*Announcement{live})
+	filterTombstoned(l, plan2)
+	if len(plan2) != 1 {
+		t.Fatal("newer remote edit must survive the tombstone")
+	}
+
+	// User re-adds the file → tombstone clears → syncs normally again.
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := l.VanishedTime("a.txt"); ok {
+		t.Fatal("tombstone not cleared on re-add")
+	}
+}
+
+// Full SyncOnce loop: the peer announces a file the local user deleted;
+// the tombstone must suppress the pull entirely (no session request at
+// all) and the file must stay gone.
+func TestSyncOnceSuppressesTombstonedPull(t *testing.T) {
+	src := bytes.Repeat([]byte("chunkdrop "), 100)
+	var starts int32
+	oldMtime := time.Now().Add(-time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/sync/state":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(Announcement{Engine: "fake", Name: "fake", Files: map[string]*FileMeta{
+				"big.bin": {Size: int64(len(src)), Mtime: oldMtime, Xxh: 1},
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/sync/start":
+			atomic.AddInt32(&starts, 1)
+			man := transfer.NewManifest("fake-session")
+			if err := man.BuildFromPairs([]transfer.SourcePair{
+				{Rel: "big.bin", Abs: writeSrc(t, src)},
+			}, transfer.BuildOptions{ChunkSize: 1024}); err != nil {
+				http.Error(w, "boom", 500)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(startResp{SessionID: "fake-session", Key: "fake-key", Manifest: man})
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	peer := PeerRef{Host: strings.TrimPrefix(srv.URL, "http://"), EngineID: "fake", Name: "fake"}
+
+	l, dir := testLocal(t, nil)
+	// The file was pulled earlier (registered locally + cached), then
+	// the user deleted it off disk.
+	disk := filepath.Join(dir, "big.bin")
+	if err := os.WriteFile(disk, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l.RecordPulled("big.bin", disk, int64(len(src)), oldMtime, 1)
+	if err := os.Remove(disk); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := l.VanishedTime("big.bin"); !ok {
+		t.Fatal("tombstone not recorded")
+	}
+
+	r := &Runner{
+		Local:  l,
+		Puller: &Puller{GroupKey: "k", Act: activity.NewLog(16), Logf: t.Logf},
+		Peers:  func() []PeerRef { return []PeerRef{peer} },
+	}
+	if err := r.SyncOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&starts) != 0 {
+		t.Errorf("tombstoned file re-pulled: %d session request(s)", starts)
+	}
+	if _, err := os.Stat(disk); !os.IsNotExist(err) {
+		t.Error("deleted file resurrected on disk")
 	}
 }
