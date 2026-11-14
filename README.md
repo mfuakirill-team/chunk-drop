@@ -5,8 +5,50 @@ A small desktop program ("engine") sends files to any phone or PC through a brow
 ("just scan the QR"), over the local network today and over the internet later.
 Optional USB-stick "sneakernet" mode for carrying chunks physically.
 
-> Status: **planning complete, ready to build M0.** No code exists yet.
-> Everything below is the agreed plan, distilled from the design discussions.
+> Status: **M0 built** — LAN one-shot send works end-to-end (engine + web app).
+> Internet mode (VPS hub) is M2; see `docs/PLAN.md` §3 for the roadmap.
+
+## Quick start (5 minutes)
+
+**What you need:** the sending machine runs the engine (Windows or Linux);
+every receiving device only needs a browser on the same network.
+
+### 1. Get a binary
+
+Build it from this checkout (Go 1.27+ and Node 20.19+ once, for the web app):
+
+```bash
+make engine-win       # → bin/engine-windows-amd64.exe
+make engine-linux     # → bin/engine-linux-amd64 + -arm64
+```
+
+### 2. Set the group key (once per machine)
+
+```bash
+./bin/engine-linux-amd64 keygen          # prints a fresh key
+nano ~/.config/chunkdrop/engine.toml     # paste it → group_key = "…"
+```
+
+On Windows the config is `%APPDATA%\chunkdrop\engine.toml` (use Notepad).
+The engine tells you this on first run — it writes the template itself.
+
+### 3. Run it and send
+
+```bash
+./bin/engine-linux-amd64
+```
+
+It prints the dashboard URL (`http://<lan-ip>:8090/`):
+
+1. Open that URL in a browser on the sending machine.
+2. Paste the group key once (the browser remembers it).
+3. **Pick files…** → **Start transfer** → a QR code appears.
+4. On the phone, scan the QR (or open the link / "Copy link").
+5. The phone shows the file list → **Save all…** → done.
+
+4 GB or 400 small files — same flow; a dropped Wi-Fi moment resumes,
+nothing is ever uploaded to a server. All options, browser differences,
+firewall/unboxing troubleshooting: **`docs/USAGE.md`**.
 
 ## Why
 
@@ -58,6 +100,7 @@ LAN (primary, M0)                          Internet (M2)
 | `docs/SECURITY.md` | Threat model, auth model, sanitization rules, accepted risks |
 | `docs/DEPLOY-VPS.md` | VPS deployment: Docker (hub) + existing nginx, configs included |
 | `docs/M0-TASKS.md` | Concrete build checklist for the first milestone |
+| `docs/USAGE.md` | **Full usage guide** — troubleshooting, options, details behind every quick-start step |
 
 ## Ground rules (from the requirements discussion)
 
