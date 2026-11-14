@@ -347,9 +347,25 @@ type SessionManager interface {
 	NewSession(m *transfer.Manifest) (*Session, error)
 }
 
+// RecordUpload registers a just-landed phone upload in local state +
+// the hash cache (M1): the file already exists on disk at abs, so this
+// stats + xxhashes it and goes through the same path as a completed
+// pull — the mesh announces it on the next round without waiting for a
+// rescan to hash it, and a tombstone for the same name is cleared.
+func (l *Local) RecordUpload(rel, abs string) {
+	st, err := os.Stat(abs)
+	if err != nil || !st.Mode().IsRegular() {
+		return
+	}
+	xxh, xerr := xxFile(abs)
+	if xerr != nil {
+		return
+	}
+	l.RecordPulled(rel, abs, st.Size(), st.ModTime(), xxh)
+}
+
 // RecordPulled notes a completed pull in local state + cache.
-func (l *Local) RecordPulled(rel string, abs string, size int64, mtime time.Time, xxh uint64) {
-	l.mu.Lock()
+func (l *Local) RecordPulled(rel string, abs string, size int64, mtime time.Time, xxh uint64) {	l.mu.Lock()
 	l.files[rel] = &LocalFile{Rel: rel, Path: abs, Size: size, Mtime: mtime, Xxh: xxh}
 	if l.cache == nil {
 		l.cache = NewHashCache(l.Dir)

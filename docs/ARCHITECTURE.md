@@ -15,7 +15,14 @@ The desktop program group members install. Responsibilities:
   exist (VPN adapters are the classic trap), the UI asks which one to put in
   the QR code.
 - **QR code generation** for the receive link (see `PROTOCOL.md` §2).
-- mDNS/zeroconf announcement so engines find each other PC↔PC (M1).
+- mDNS/zeroconf announcement so engines find each other PC↔PC (M1) —
+  **shipped as authenticated UDP broadcast beacons on `:8091`** instead:
+  same home-LAN scope, no extra dependency, already HMAC'd with the
+  group key (`internal/discovery`). Real mDNS stays out until a device
+  proves broadcast is filtered.
+- **Phone→PC push (M1)**: mints RAM-only upload slots and verifies every
+  uploaded chunk server-side (`internal/upload`); uploads land in the
+  sync folder so they propagate through the mesh.
 - USB stick watching + marker import/export (M4).
 - No background daemon-ness required: you launch it, you transfer, you close it.
 
@@ -50,7 +57,11 @@ Two modes in the UI:
 - **Receive mode** — file list, per-file/per-chunk progress, download &
   "save all", chunk-hash verification, retry handling.
 - **Sender dashboard** — file/folder picker, QR screen, live receiver progress
-  (receivers POST their chunk bitmaps; the sender page polls session state).
+  (receivers POST their chunk bitmaps; the sender page polls session state),
+  plus the **Receive from a phone** card (M1) that mints the upload link.
+- **Upload mode** (`/u/` mount, M1) — phone-side pick + upload pipeline:
+  browser-built manifest (hash-wasm), 2 chunks in flight, 3 retries with
+  backoff, progress; never offers a dashboard-back affordance.
 
 Browser capability matrix we design around:
 
@@ -149,10 +160,12 @@ chunkdrop/
 │   └── hub/main.go           # VPS binary
 ├── internal/
 │   ├── api/                  # REST endpoints, auth middleware
-│   ├── transfer/             # manifest, chunking, SHA-256, resume bitmaps
+│   ├── transfer/             # manifest, chunking, SHA-256, sanitize, ZIP
 │   ├── session/              # session lifecycle, keys, expiry
+│   ├── upload/               # phone→PC push slots, staging, finish (M1)
+│   ├── syncmesh/             # shared-folder PC↔PC sync (M0.2)
+│   ├── discovery/            # engine↔engine beacons :8091 (M1; mDNS-fulfilling)
 │   ├── lanip/                # interface enumeration for QR
-│   ├── mdns/                 # engine↔engine discovery (M1)
 │   ├── webrtc/               # pion glue (M2)
 │   └── usb/                  # marker, import/export, mount polling (M4)
 ├── web/                      # Preact + Vite + TS, built to web/dist,

@@ -32,6 +32,7 @@ import (
 	"chunkdrop/internal/picker"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
+	"chunkdrop/internal/upload"
 	"chunkdrop/internal/webui"
 )
 
@@ -197,6 +198,27 @@ func run(portFlag int, bindFlag string) error {
 		}
 	}
 
+	// Phone→PC push (M1, PROTOCOL.md §4 upload table): RAM-only upload
+	// sessions, gated by the upload key minted via /api/upload/new.
+	// Uploads land in the sync folder (so they propagate mesh-wide)
+	// unless receive_dir overrides it. Leftover staging dirs from a
+	// previous run are cleared — nothing can be in flight at startup.
+	srv.Uploads = upload.NewManager()
+	uploadDest := cfg.ReceiveDir
+	if uploadDest == "" {
+		if srv.Sync != nil {
+			uploadDest = srv.Sync.Dir
+		} else if d, derr := config.DefaultReceiveDir(); derr == nil {
+			uploadDest = d
+		}
+	}
+	srv.UploadDest = uploadDest
+	srv.MaxUploadBytes = cfg.MaxUploadBytes
+	srv.Uploads.CleanStale(uploadDest)
+	if srv.Sync == nil || !strings.EqualFold(srv.Sync.Dir, uploadDest) {
+		log.Printf("phone uploads land in: %s", uploadDest)
+	}
+
 	bindAddr := lanip.BindAddr(candidates, advertise, cfg.Port)
 	ln, err := net.Listen("tcp", bindAddr)
 	if err != nil {
@@ -223,7 +245,8 @@ func run(portFlag int, bindFlag string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Session reaper: 24 h expiry enforced (PROTOCOL.md §6).
+	// Session reaper: 24 h expiry enforced (PROTOCOL.md §6); the upload
+	// manager rides the same tick (its TTL mirrors the session TTL).
 	reapStop := make(chan struct{})
 	go func() {
 		t := time.NewTicker(time.Minute)
@@ -232,6 +255,7 @@ func run(portFlag int, bindFlag string) error {
 			select {
 			case <-t.C:
 				sm.Reap()
+				srv.Uploads.Reap()
 			case <-reapStop:
 				return
 			}
@@ -248,6 +272,7 @@ func run(portFlag int, bindFlag string) error {
 	fmt.Printf("  ChunkDrop engine ready\n")
 	fmt.Printf("  dashboard:  %s\n", url)
 	fmt.Printf("  receive:    %s/r/#k=<session-key>\n", strings.TrimSuffix(url, "/"))
+	fmt.Printf("  upload:     %s/u/#k=<upload-key>  (make the link in the dashboard)\n", strings.TrimSuffix(url, "/"))
 	if srv.Sync != nil {
 		fmt.Printf("  sync dir:   %s\n", srv.Sync.Dir)
 	}

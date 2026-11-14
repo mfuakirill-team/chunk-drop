@@ -144,7 +144,7 @@ func TestSanitizeRule6CaseCollision(t *testing.T) {
 		{Path: "A.jpg"},
 		{Path: "a.jpg"},
 	}
-	out := resolveCaseCollisions(files)
+	out := ResolveCaseCollisions(files)
 	if out[1].Path == "a.jpg" {
 		t.Fatalf("collision not renamed: %v", out)
 	}
@@ -158,7 +158,7 @@ func TestSanitizeRule6CaseCollision(t *testing.T) {
 		{Path: "X/a.txt"},
 		{Path: "x/A.txt"},
 	}
-	out = resolveCaseCollisions(files)
+	out = ResolveCaseCollisions(files)
 	if out[1].Path == "x/A.txt" {
 		t.Errorf("cross-directory case collision not resolved: %v", out)
 	}

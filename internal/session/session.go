@@ -60,6 +60,15 @@ type Session struct {
 	Progress   Progress
 	ProgressAt time.Time
 
+	// Per-receiver ZIP variant (M1, PROTOCOL.md §3): a mobile receiver
+	// with a many-small selection is served a store-ZIP manifest while
+	// desktops keep the tree. Built lazily on the first mobile manifest
+	// request and cached here, so the archive is written once per
+	// session, not once per request.
+	pmMu    sync.Mutex
+	pmCache *transfer.Manifest
+	pmErr   error
+
 	mu sync.Mutex
 }
 
@@ -284,4 +293,19 @@ func (s *Session) HasProgress() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return !s.ProgressAt.IsZero()
+}
+
+// PackedZip returns the session's packed (store-ZIP) manifest variant,
+// building it once via build when first needed. The build result
+// (including its error) is cached for the session lifetime, so a
+// transient disk failure is surfaced consistently instead of flipping
+// between tree and ZIP across requests.
+func (s *Session) PackedZip(build func() (*transfer.Manifest, error)) (*transfer.Manifest, error) {
+	s.pmMu.Lock()
+	defer s.pmMu.Unlock()
+	if s.pmCache != nil || s.pmErr != nil {
+		return s.pmCache, s.pmErr
+	}
+	s.pmCache, s.pmErr = build()
+	return s.pmCache, s.pmErr
 }

@@ -16,7 +16,8 @@
 | Stranger on the LAN with a sniffer | Reads WiFi frames (plain HTTP) | **Accepted risk until M5** (home WiFi: fine). M5: TLS with self-signed cert, fingerprint pinned inside the QR | accepted → M5 |
 | Stranger on the internet | Hits the VPS hub | Rooms require the group key at creation; codes are 30 bits + a room secret; rate-limited creation; hub stores nothing | M2 |
 | Malicious "receiver" with a valid QR link | Gets exactly the files that session offers — nothing more | Sessions are scoped per transfer; engine exposes no filesystem beyond the manifest | M0 |
-| Malicious sender (M1 uploads) | Sends crafted manifests/paths | Path rules in `PROTOCOL.md` §8 enforced receiver-side; per-chunk hash verification before disk write; total-size caps | M1 |
+| Malicious sender (M1 uploads) | Sends crafted manifests/paths | Path rules in `PROTOCOL.md` §8 enforced receiver-side; per-chunk hash verification before disk write (against header **and** declared hash); total-size caps; staging inside the excluded `hashes/uploads/` tree, so half-uploads are never announced or synced; finished uploads stamp phone mtimes, so a crafted old/new mtime can only reorder mesh newest-wins, never bypass tombstones | M1 |
+| Anyone with the `/u/` link (M1) | Pushes files onto the engine PC while the link is open | Link = 16-byte key in the URL fragment (same possession model as receive links); dashboard **Close link** kills it instantly and wipes staging; slots expire after 24 h; RAM-only — engine restart kills everything; uploads land only in the destination dir, never elsewhere | M1 |
 | VPS compromise (hub container) | Runs our hub code, sees relayed ciphertext, sees IPs/timing | Relay frames are AES-GCM under `HKDF(roomSecret)` — hub pipes bytes it cannot decrypt; **no files at rest ever**; metadata exposure (IPs, session timing, sizes) accepted | M2 |
 | Departed group member | Still holds the group key | Rotate: generate new key, update engine+hub configs, redistribute | procedure below |
 | Path traversal / zip-slip | Crafted `../../` or reserved names | `PROTOCOL.md` §8 rules 1–7, with tests | M0 |
@@ -26,6 +27,9 @@
 - **Group key** (32 B) — gates engine↔engine and engine↔hub usage.
 - **Session key** (16 B) — gates one transfer; travels only via the QR/link
   fragment, then as a header, compared in constant time.
+- **Upload key** (16 B) — same shape, opposite direction (M1): gates one
+  phone→PC push; the dashboard mints it, the `/u/` page carries it in the
+  fragment, every upload endpoint compares it constant-time.
 - **A User-Agent/version check is explicitly not an auth check** — decided in
   the design discussion: anyone can type `curl -H "User-Agent: MyApp/1.0"`.
   It may be logged as metadata; nothing more.

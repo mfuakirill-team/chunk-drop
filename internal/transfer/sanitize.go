@@ -120,7 +120,7 @@ func isDrivePath(p string) bool {
 // NormalizeNFC returns the NFC form of s (rule 2).
 func NormalizeNFC(s string) string { return norm.NFC.String(s) }
 
-// resolveCaseCollisions enforces rule 6 on a built file list:
+// ResolveCaseCollisions enforces rule 6 on a built file list:
 // paths that differ only by case (within one manifest) are renamed
 // with a numeric suffix — never silently overwritten. The engine runs
 // this after building a manifest; receivers additionally validate
@@ -128,7 +128,7 @@ func NormalizeNFC(s string) string { return norm.NFC.String(s) }
 //
 // Renaming keeps the extension: "A.jpg", "a.jpg" → "a (1).jpg".
 // It is a programming error to call this with unsanitized paths.
-func resolveCaseCollisions(files []File) []File {
+func ResolveCaseCollisions(files []File) []File {
 	seen := make(map[string]bool, len(files))
 	for i := range files {
 		key := strings.ToLower(files[i].Path)

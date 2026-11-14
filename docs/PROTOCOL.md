@@ -67,15 +67,22 @@ Rules:
 - One chunk size per manifest; the last chunk of each file may be short.
 - `packedAsZip: true` → manifest describes a single file `bundle.zip`
   (store-mode ZIP: no compression, structure preserved inside).
-- Recommended sender behavior: if receiver is mobile and the batch has > 50
-  files, offer (or auto-apply) store-mode ZIP packing.
+- **Auto-ZIP is per receiver (M1)**: the session's manifest is the tree;
+  a receiver whose User-Agent is mobile **and** whose selection is a
+  many-small batch (> 50 files, average file < 64 MiB) gets a lazily
+  built packed variant instead — built once per session and cached, so
+  desktop receivers keep the tree while phones keep one download.
+  `GET /api/manifest?zip=1` forces the packed variant, `?zip=0` opts
+  out; `GET /api/chunk/{f}/{c}` serves bytes from the same variant the
+  receiver was shown (indices refer to it).
 
 ## 4. Engine HTTP API (LAN, normative)
 
 | Method & path | Purpose |
 |---|---|
 | `GET /r/` | Receive web page (embedded web app) |
-| `GET /api/manifest` | Manifest (gzip) |
+| `GET /u/` | Phone→PC push page (M1) — public like `/r/`; the upload key lives in the fragment |
+| `GET /api/manifest` | Manifest (gzip); `?zip=1|0` forces/opts out of the packed variant (§3) |
 | `GET /api/chunk/{fileIndex}/{chunkIndex}` | Raw chunk bytes; `X-Chunk-Hash: <sha256hex>` header as a convenience cross-check |
 | `POST /api/progress` | Body: `{"have":{"0":[0,1,2,17,…], …}}` — chunk bitmap per file; sender UI polls session state to display it |
 | `POST /api/cancel` | Close the session |
@@ -112,7 +119,9 @@ devices by design.
 | 🔒 `GET /api/peers` | LAN discovery view: `{"self":{…},"peers":[{id,name,ip,port}…]}` |
 | `GET /api/sync/state` | This engine's shared-folder announcement: `{"files":{rel:{size,mtime,xxh}},"deleted":{rel:mtime}}` |
 | `POST /api/sync/start` | Body `{"rels":["…"]}` → session serving those files for a peer |
-| 🔒 `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries]}` |
+| 🔒 `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries],"incoming":[phone pushes in progress]}` |
+| 🔒 `POST /api/upload/new` | Mint a phone-upload slot: `{"id","key"}` (§4 upload direction) |
+| 🔒 `POST /api/upload/close` | Kill a phone-upload link: body `{"key":"<upload-key>"}` |
 
 Sync normative details:
 - **In-progress pull temp files are never announced or planned.** A
@@ -160,14 +169,36 @@ Receiver behavior (normative):
 
 Upload direction (phone → PC, M1, normative):
 
+The dashboard mints the slot and hands the key to the phone; the phone
+then drives the whole upload with that key. Possession of the upload
+key is the authorization — the same model as receive links, direction
+reversed. Staged bytes live under the destination's excluded
+`hashes/uploads/<uploadId>/` tree: invisible to the sync scan, never
+announced to peers, and cleared at startup (an engine restart kills
+every upload).
+
 | Method & path | Purpose |
 |---|---|
-| `POST /api/upload/start` | Body: manifest (browser-built); engine validates paths/sizes/caps → `uploadId` |
-| `PUT /api/upload/{uploadId}/chunk/{f}/{c}` | Body: chunk bytes + `X-Chunk-Hash` header; engine verifies hash before ack |
-| `POST /api/upload/{uploadId}/finish` | Engine finalizes into the configured receive directory |
+| 🔒 `POST /api/upload/new` | Dashboard mints a slot: `{"id","key"}` (RAM-only, 24 h TTL) |
+| 🔒 `POST /api/upload/close` | Dashboard kills a link: body `{"key":"<upload-key>"}`; wipes its staging |
+| `POST /api/upload/start` | Body: `{"files":[{path,size,chunkCount,hashes,mtime}…]}` (browser-built manifest); engine validates §8 paths, chunk math, hash shape, caps → `{"id","files","bytes"}` |
+| `PUT /api/upload/{uploadId}/chunk/{f}/{c}` | Body: chunk bytes + `X-Chunk-Hash` header; engine verifies against **both** the header and the declared manifest hash before ack; body capped at exactly one chunk |
+| `POST /api/upload/{uploadId}/finish` | Engine checks completeness + sizes, renames each staged file into place (atomic, same filesystem), stamps the phone's mtime, refreshes the sync state; idempotent on retry |
 
-The engine verifies every uploaded chunk hash — never trust a client's
-manifest claims.
+Normative details:
+- Upload sessions are RAM-only with a 24 h TTL — same lifetime as
+  receive sessions; a duplicate finish after a lost response still
+  returns `200` (the finished upload authenticates until expiry).
+- The `{uploadId}` in the URL path must belong to the authenticated
+  key; a mismatch gets the generic `404` (nothing about other slots).
+- Uploads land in the **sync folder** by default so they propagate to
+  the other engines through the existing mesh; `receive_dir` in
+  engine.toml overrides (then they stay on this PC).
+- The engine verifies every uploaded chunk hash — never trust a
+  client's manifest claims. Phone mtimes are preserved
+  (`os.Chtimes`) so mesh newest-wins stays meaningful.
+- The `/u/` page is a public mount like `/r/` and never offers a
+  dashboard-back affordance.
 
 ## 5. Chunk framing off-HTTP (M2 internet mode — provisional)
 

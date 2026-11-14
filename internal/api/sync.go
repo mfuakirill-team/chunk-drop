@@ -146,10 +146,16 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	if events == nil {
 		events = []activity.Event{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"events":  events,
 		"uploads": s.liveUploads(),
-	})
+	}
+	if s.Uploads != nil {
+		// Phone→PC pushes in progress (M1) — the feed shows their
+		// progress the same way it shows live receive sessions.
+		resp["incoming"] = s.Uploads.List()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // uploadInfo summarizes one currently-served session for the feed.

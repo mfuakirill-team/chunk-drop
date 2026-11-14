@@ -8,6 +8,7 @@ import { useEffect, useState } from "preact/hooks";
 import { KEY_HEADER } from "./api";
 import { loadGroupKey } from "./storage";
 import type { SendState } from "./send";
+import { humanBytes } from "./util";
 
 interface PeerInfo {
   id: string;
@@ -40,6 +41,16 @@ interface UploadInfo {
 interface ActivityResp {
   events: ActivityEvent[];
   uploads: UploadInfo[];
+  // Phone→PC pushes in progress (M1, /api/activity "incoming").
+  incoming?: IncomingUpload[];
+}
+
+interface IncomingUpload {
+  id: string;
+  files: number;
+  bytesDone: number;
+  bytesTotal: number;
+  since: string;
 }
 
 const KIND_MARK: Record<string, string> = {
@@ -173,6 +184,13 @@ export function ActivityPanel({ send }: { send: SendState | null }) {
                 : "idle — no transfers in flight"}
             </p>
           )}
+          {/* phone→PC pushes in progress (M1) */}
+          {(act?.incoming ?? []).map((u) => (
+            <p class="muted" style="margin:4px 0">
+              ▼ phone pushing {u.files} file(s) — {humanBytes(u.bytesDone)}
+              {u.bytesTotal > 0 ? ` / ${humanBytes(u.bytesTotal)}` : ""}
+            </p>
+          ))}
           <ul class="act">
             {latest.map((e) => (
               <li>

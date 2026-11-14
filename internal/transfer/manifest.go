@@ -292,6 +292,34 @@ func (m *Manifest) buildPacked(files []srcFile, zipPath string, chunkSize int64)
 	return nil
 }
 
+// BuildPackedVariant packs an already-built (unpacked) manifest into a
+// store-mode ZIP at zipPath and returns the variant manifest: one file
+// (the archive), same session id and chunk size. Source paths are taken
+// from the built manifest (File.SourcePath), so no second walk happens.
+// M1 per-receiver ZIP (PROTOCOL.md §3): the session keeps serving the
+// tree to desktop receivers while phones get this variant.
+func BuildPackedVariant(m *Manifest, zipPath string) (*Manifest, error) {
+	if m == nil {
+		return nil, errors.New("nil manifest")
+	}
+	if m.PackedAsZip {
+		return m, nil // already packed: nothing to build
+	}
+	pairs := make([]srcFile, 0, len(m.Files))
+	for _, f := range m.Files {
+		if f.SourcePath == "" {
+			return nil, fmt.Errorf("file %q has no source path", f.Path)
+		}
+		pairs = append(pairs, srcFile{relPath: f.Path, absPath: f.SourcePath, size: f.Size})
+	}
+	out := NewManifest(m.SessionID)
+	out.ChunkSize = m.ChunkSize
+	if err := out.buildPacked(pairs, zipPath, int64(m.ChunkSize)); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // hashSource streams absPath chunk by chunk and fills f.Hashes.
 // Whole files are never loaded into RAM.
 func (f *File) hashSource(absPath string, chunkSize int64) error {

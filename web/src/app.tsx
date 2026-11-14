@@ -10,6 +10,7 @@ import { parseFragmentKey } from "./link";
 import { ActivityPanel, PeersPanel } from "./peers";
 import { ReceivePage } from "./receive";
 import { SendPage, type SendState } from "./send";
+import { UploadPage } from "./upload";
 import { setFragment } from "./link";
 
 export function App() {
@@ -19,10 +20,16 @@ export function App() {
   // ReceivePage, never a dashboard that cannot work), and it carries no
   // "back to sender dashboard" affordance. On the engine's own page (/)
   // switching into receive mode keeps the back button.
+  // /u/ (M1) is the phone→PC push page: same standalone treatment —
+  // the upload key lives in the fragment, the dashboard is not
+  // reachable from the phone, so there is no back affordance either.
   const standaloneReceiveLink = location.pathname.startsWith("/r/");
+  const uploadLink = location.pathname.startsWith("/u/");
   const [key, setKey] = useState(parseFragmentKey(location.hash));
-  const [mode, setMode] = useState<"receive" | "send">(
-    parseFragmentKey(location.hash) || standaloneReceiveLink ? "receive" : "send",
+  const [mode, setMode] = useState<"receive" | "send" | "upload">(
+    uploadLink ? "upload"
+      : parseFragmentKey(location.hash) || standaloneReceiveLink ? "receive"
+      : "send",
   );
   const [send, setSend] = useState<SendState | null>(null);
 
@@ -42,7 +49,9 @@ export function App() {
         <h1>ChunkDrop</h1>
         <span class="muted">chunked · resumable · private</span>
       </header>
-      {mode === "receive" ? (
+      {mode === "upload" ? (
+        <UploadPage uploadKey={key} />
+      ) : mode === "receive" ? (
         <ReceivePage
           sessionKey={key}
           onBack={standaloneReceiveLink ? undefined : goSend}
@@ -56,7 +65,7 @@ export function App() {
           </div>
         </div>
       )}
-      {!(mode === "receive" && standaloneReceiveLink) && (
+      {!(mode === "receive" && standaloneReceiveLink) && mode !== "upload" && (
         <footer class="muted">
           <p>
             {mode === "receive" ? (

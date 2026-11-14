@@ -68,6 +68,20 @@ button {
 button:disabled { opacity: 0.5; cursor: default; }
 button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
 
+/* label.bigbtn: a <label> wrapping a hidden file input, styled like a
+   button so the phone upload page gets native picker affordances. */
+label.bigbtn {
+  display: inline-block;
+  font: inherit;
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+label.bigbtn.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+
 input[type="text"], input[type="password"] {
   font: inherit;
   width: 100%;

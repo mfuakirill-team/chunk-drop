@@ -7,8 +7,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 // sit in their own frame with a Reset button; Cancel sits next to
 // Start; activity/progress live in the side panel (PeersPanel).
 
-import { KEY_HEADER, type SessionInfo } from "./api";
-import { buildReceiveUrl } from "./link";
+import { KEY_HEADER, postUploadClose, postUploadNew, type SessionInfo } from "./api";
+import { buildReceiveUrl, buildUploadUrl } from "./link";
 import { renderQr } from "./qr";
 import { loadGroupKey, saveGroupKey } from "./storage";
 
@@ -263,6 +263,8 @@ export function SendPage({ onStart, onChange }: Props) {
           </p>
         </div>
       )}
+
+      <PhoneUploadCard />
     </div>
   );
 }
@@ -273,4 +275,100 @@ async function fetchSessionWithId(id: string, key: string): Promise<SessionInfo>
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
+}
+
+// M1 "Receive from a phone": mints an upload slot (RAM-only, 24 h)
+// and shows its /u/ QR for the phone to scan. The slot carries no
+// files until the phone pushes them; Close-link kills it.
+export function PhoneUploadCard() {
+  const [slot, setSlot] = useState<{ id: string; key: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [copied, setCopied] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const url = slot ? buildUploadUrl(location.origin, slot.key) : "";
+
+  useEffect(() => {
+    if (!slot) return;
+    const canvas = canvasRef.current;
+    if (canvas) void renderQr(canvas, url).catch(() => {});
+  }, [slot]);
+
+  const open = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      setSlot(await postUploadNew(loadGroupKey()));
+    } catch (e) {
+      const st = (e as Error & { status?: number }).status;
+      setErr(
+        st === 401
+          ? "Group key rejected — set it above first."
+          : `Could not open an upload link (HTTP ${st ?? "?"})`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const close = async () => {
+    if (!slot) return;
+    setBusy(true);
+    try {
+      await postUploadClose(loadGroupKey(), slot.key);
+      setSlot(null);
+    } catch {
+      setErr("Closing the link failed — it expires on its own within 24 h.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="card">
+      <h3 style="margin-top:0">Receive from a phone</h3>
+      {!slot ? (
+        <div>
+          <p class="muted" style="margin-bottom:8px">
+            Let a phone push photos/files into this PC — they land in the
+            sync folder and propagate to your other engines.
+          </p>
+          <button disabled={busy || !loadGroupKey()} onClick={() => void open()}>
+            {busy ? "Opening…" : "Open a phone upload link"}
+          </button>
+          {!loadGroupKey() && (
+            <p class="muted">set the group key above first</p>
+          )}
+          {err && <p class="error">{err}</p>}
+        </div>
+      ) : (
+        <div>
+          <canvas class="qr" ref={canvasRef} width={320} height={320} />
+          <p>
+            <button
+              class="secondary"
+              onClick={() => {
+                void navigator.clipboard?.writeText(url);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+            >
+              {copied ? "Copied!" : "Copy link"}
+            </button>{" "}
+            <button class="secondary" disabled={busy} onClick={() => void close()}>
+              Close link
+            </button>
+          </p>
+          <p class="muted" style={{ overflowWrap: "anywhere" }}>
+            {url}
+          </p>
+          <p class="muted" style="margin-bottom:0">
+            Anyone with this link can upload until you close it (or 24 h) —
+            files land on this PC only.
+          </p>
+        </div>
+      )}
+    </div>
+  );
 }

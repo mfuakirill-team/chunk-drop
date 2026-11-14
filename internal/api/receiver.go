@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"chunkdrop/internal/activity"
@@ -16,10 +17,74 @@ import (
 
 // Receiver-side endpoints (docs/PROTOCOL.md §4).
 
+// Auto-ZIP thresholds (PROTOCOL.md §3, M1): a mobile receiver with many
+// *small* files gets one store-ZIP instead of the tree. The average-size
+// guard keeps "60 two-hour videos" from being pointlessly duplicated.
+const (
+	zipAutoFiles  = 50
+	zipAutoAvgMax = 64 << 20
+	zipMobileUARe = "iPhone|iPad|iPod|Android|Mobile"
+)
+
+// isMobileUA reports whether the request looks like it comes from a
+// phone/tablet browser — metadata used for the ZIP convenience only,
+// never for authorization (PROTOCOL.md §1).
+func isMobileUA(ua string) bool {
+	return strings.Contains(ua, "iPhone") || strings.Contains(ua, "iPad") ||
+		strings.Contains(ua, "iPod") || strings.Contains(ua, "Android") ||
+		strings.Contains(ua, "Mobile")
+}
+
+// wantPacked decides whether this receiver gets the packed variant:
+// `?zip=1` forces it, `?zip=0` opts out, default is auto (mobile UA +
+// many-small selection).
+func (s *Server) wantPacked(r *http.Request, m *transfer.Manifest) bool {
+	if m.PackedAsZip || len(m.Files) <= 1 {
+		return false // already packed / single file: no variant to build
+	}
+	switch r.URL.Query().Get("zip") {
+	case "1":
+		return true
+	case "0":
+		return false
+	}
+	if !isMobileUA(r.Header.Get("User-Agent")) {
+		return false
+	}
+	if len(m.Files) <= zipAutoFiles {
+		return false
+	}
+	avg := m.TotalSize() / int64(len(m.Files))
+	return avg < zipAutoAvgMax
+}
+
+// receiverManifest returns the manifest variant for this request: the
+// session's own manifest, or its lazily built packed variant. The build
+// runs once per session (session.PackedZip caches the result).
+func (s *Server) receiverManifest(r *http.Request, sess *session.Session) *transfer.Manifest {
+	m := sess.Manifest
+	if !s.wantPacked(r, m) {
+		return m
+	}
+	pm, err := sess.PackedZip(func() (*transfer.Manifest, error) {
+		variant, berr := transfer.BuildPackedVariant(m, tempZipPath())
+		if berr == nil {
+			s.Activity.Add(activity.KindUp, fmt.Sprintf(
+				"packed %d file(s) as ZIP for a mobile receiver", len(m.Files)))
+		}
+		return variant, berr
+	})
+	if err != nil {
+		return m // packing failed (disk full, source gone): keep the tree
+	}
+	return pm
+}
+
 // handleManifest serves the manifest JSON with gzip content-encoding.
 func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	sess := fromSession(r)
-	b, err := sess.Manifest.JSON()
+	m := s.receiverManifest(r, sess)
+	b, err := m.JSON()
 	if err != nil {
 		http.Error(w, `{"error":"manifest encode"}`, http.StatusInternalServerError)
 		return
@@ -32,10 +97,11 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleChunk streams chunk c of file f. Unknown indices → 404 with a
-// generic body — no path hints (SECURITY.md §2).
+// generic body — no path hints (SECURITY.md §2). The file indices refer
+// to the manifest variant this receiver was served (tree or packed).
 func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 	sess := fromSession(r)
-	m := sess.Manifest
+	m := s.receiverManifest(r, sess)
 
 	f, err := strconv.Atoi(r.PathValue("f"))
 	if err != nil {
@@ -135,14 +201,14 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 func humanBytes(n int64) string {
 	const k = 1024
 	switch {
-	case n >= k*k*k*k*k:
-		return fmt.Sprintf("%.1f TB", float64(n)/(k*k*k*k*k))
-	case n >= k*k*k*k:
-		return fmt.Sprintf("%.1f GB", float64(n)/(k*k*k*k))
-	case n >= k*k*k:
-		return fmt.Sprintf("%.1f MB", float64(n)/(k*k*k))
-	case n >= k*k:
-		return fmt.Sprintf("%.1f KB", float64(n)/(k*k))
+	case n >= k*k*k*k: // 1 TiB
+		return fmt.Sprintf("%.1f TB", float64(n)/(k*k*k*k))
+	case n >= k*k*k: // 1 GiB
+		return fmt.Sprintf("%.1f GB", float64(n)/(k*k*k))
+	case n >= k*k: // 1 MiB
+		return fmt.Sprintf("%.1f MB", float64(n)/(k*k))
+	case n >= k: // 1 KiB
+		return fmt.Sprintf("%.1f KB", float64(n)/k)
 	default:
 		return fmt.Sprintf("%d B", n)
 	}

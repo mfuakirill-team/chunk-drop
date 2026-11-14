@@ -289,6 +289,33 @@ individually by the receiver and retried with backoff. A 4 GB file =
 restart. The `X-Chunk-Hash` response header is a cross-check: the
 receiver hashes the bytes itself and compares both.
 
+### 4.5 Receive from a phone (phone → PC push, M1)
+
+The reverse direction: the phone pushes files **into** the PC.
+
+1. On the dashboard click **Open a phone upload link** (the *Receive
+   from a phone* card). A QR appears.
+2. Scan it (or copy the link) with the phone — it opens the `/u/`
+   page. Pick **Choose files** or **Choose a folder**.
+3. The phone builds the manifest (hashes every 4 MiB chunk), streams
+   the chunks, and the engine verifies **every** chunk server-side
+   before keeping it. Watch the progress on both screens.
+4. Done — the files land in the **sync folder**
+   (`~/Downloads/chunk-drop-files`) and propagate to your other
+   engines automatically. (Set `receive_dir` in engine.toml to keep
+   uploads on this PC instead.)
+
+Notes:
+
+- The link is dangerous-ish while open: **anyone with it can upload**
+  to this PC until you press **Close link** (or it expires, 24 h).
+  Close it as soon as the phone is done.
+- Upload sessions are RAM-only: restarting the engine kills a
+  half-finished upload (the phone page shows an error; start a new
+  link).
+- Phone mtimes are preserved, so mesh newest-wins and sorting stay
+  meaningful.
+
 ---
 
 ## 4.9 Install as an app (PWA) on the phone
@@ -481,6 +508,17 @@ becomes readable to local users), or remove the mount and set
 folder the container cannot write has the same cause — mount it and use
 your `PUID`/`PGID`.
 
+### 5.12 Phone upload problems (M1)
+
+| Symptom | Cause / fix |
+|---|---|
+| "Open a phone upload link" is greyed out | Set the group key in the dashboard first (the link is minted by the engine, which needs the key). |
+| Phone says the computer rejected the transfer | The engine validates names/paths (`docs/PROTOCOL.md` §8) and size caps — rename the file (no `../`, no Windows-reserved names) or raise `max_upload_bytes`. |
+| "Session key rejected"/401 on the phone after it worked | The link was closed (or the engine restarted — upload state is RAM-only). Open a new link. |
+| Files didn't arrive but the phone says "Sent" | Check the destination: the **sync folder** by default, or `receive_dir` if set. The dashboard's Activity feed logs every landed file. |
+| Phone picks a folder but files arrive flat | Firefox (some versions) ignores folder picks — it sends files without their folder prefix. Use Chrome/Safari on the phone, or accept the flat batch. |
+| A `hashes/uploads/` folder in the sync folder | That's upload staging — never synced, never announced, auto-cleared. Leave it. |
+
 ---
 
 ## 6. What's safe / what to keep private
@@ -489,6 +527,10 @@ your `PUID`/`PGID`.
   link can fetch (only) that session's files. It lives in the URL
   *fragment* (`#/`), so it never appears in server logs or HTTP
   requests to other hosts.
+- **An upload link works the other way: anyone with it can push files
+  onto that PC** until you close the link (24 h max). Close it when the
+  phone is done; the files land in the sync folder, so treat it like
+  any other way a file can appear there.
 - **The group key opens the sender side** (session creation). Keep it
   out of chats you don't trust; rotate on member exit (§2.1).
 - The engine binds LAN interfaces and serves plain HTTP — fine for the

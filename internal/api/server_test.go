@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -480,3 +481,132 @@ func TestReceivePageAssetsLoadRemotely(t *testing.T) {
 }
 
 var assetRefRE = regexp.MustCompile(`(?:src|href)="(/assets/[^"]+|/icons/[^"]+|/manifest\.webmanifest)"`)
+
+// M1 per-receiver ZIP (PROTOCOL.md §3): a mobile receiver with a
+// many-small selection is served one store-ZIP while desktop receivers
+// keep the tree — same session, built lazily exactly once.
+func TestManifestZipPerReceiver(t *testing.T) {
+	dir := t.TempDir()
+	folder := filepath.Join(dir, "photos")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const n = 60 // > zipAutoFiles
+	for i := range n {
+		if err := os.WriteFile(
+			filepath.Join(folder, fmt.Sprintf("p%03d.jpg", i)),
+			[]byte(fmt.Sprintf("photo-%03d", i)), 0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := transfer.NewManifest("zip-test")
+	if err := m.BuildFromPaths([]string{folder}, transfer.BuildOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	sm := session.NewManager()
+	sess, err := sm.NewSession(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(sm, nil)
+	srv.GroupKey = ""
+	h := srv.Handler()
+
+	getManifest := func(ua, query string) *transfer.Manifest {
+		req := httptest.NewRequest(http.MethodGet, "/api/manifest"+query, nil)
+		req.Header.Set(HeaderKey, sess.KeyEncoded())
+		if ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("manifest = %d", rec.Code)
+		}
+		zr, err := gzip.NewReader(rec.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got transfer.Manifest
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("manifest json: %v", err)
+		}
+		return &got
+	}
+
+	const desktop = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120"
+	const phone = "Mozilla/5.0 (iPhone; CPU iPhone OS 17) Mobile Safari"
+
+	// Desktop receiver: tree.
+	if dm := getManifest(desktop, ""); dm.PackedAsZip || len(dm.Files) != n {
+		t.Errorf("desktop manifest: packed=%v files=%d", dm.PackedAsZip, len(dm.Files))
+	}
+	// Mobile receiver: packed variant, single ZIP file.
+	pm := getManifest(phone, "")
+	if !pm.PackedAsZip || len(pm.Files) != 1 {
+		t.Fatalf("mobile manifest: packed=%v files=%d", pm.PackedAsZip, len(pm.Files))
+	}
+	if pm.Files[0].ChunkCount == 0 {
+		t.Error("packed variant has no chunks")
+	}
+	// The packed session's chunk endpoint serves the archive bytes.
+	req := httptest.NewRequest(http.MethodGet, "/api/chunk/0/0", nil)
+	req.Header.Set(HeaderKey, sess.KeyEncoded())
+	req.Header.Set("User-Agent", phone)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !bytes.HasPrefix(rec.Body.Bytes(), []byte("PK")) {
+		t.Errorf("packed chunk = %d %q…, want ZIP bytes", rec.Code, rec.Body.String()[:min(2, rec.Body.Len())])
+	}
+	// Built once: a second mobile request must reuse the cached variant.
+	if pm2 := getManifest(phone, ""); pm2.Files[0].Size != pm.Files[0].Size {
+		t.Error("second mobile request rebuilt the ZIP variant")
+	}
+	// Opt-out (?zip=0) and force (?zip=1) work regardless of UA.
+	if om := getManifest(phone, "?zip=0"); om.PackedAsZip || len(om.Files) != n {
+		t.Errorf("?zip=0 on mobile: packed=%v files=%d", om.PackedAsZip, len(om.Files))
+	}
+	if fm := getManifest(desktop, "?zip=1"); !fm.PackedAsZip || len(fm.Files) != 1 {
+		t.Errorf("?zip=1 on desktop: packed=%v files=%d", fm.PackedAsZip, len(fm.Files))
+	}
+	// The desktop manifest stays the tree after the variant exists.
+	if dm := getManifest(desktop, ""); dm.PackedAsZip || len(dm.Files) != n {
+		t.Errorf("desktop manifest after mobile request: packed=%v files=%d", dm.PackedAsZip, len(dm.Files))
+	}
+}
+
+// The session-level cache: PackedZip builds at most once, even when the
+// first build fails (consistent error, no repeated disk hammering).
+func TestPackedZipBuiltOnce(t *testing.T) {
+	m := transfer.NewManifest("pz")
+	sm := session.NewManager()
+	sess, err := sm.NewSession(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builds := 0
+	build := func() (*transfer.Manifest, error) {
+		builds++
+		return transfer.NewManifest("pz-packed"), nil
+	}
+	a, _ := sess.PackedZip(build)
+	b, _ := sess.PackedZip(build)
+	if builds != 1 || a != b {
+		t.Errorf("builds=%d, same pointer=%v", builds, a == b)
+	}
+	// A failed build is cached as an error for the session lifetime.
+	sess2, _ := sm.NewSession(transfer.NewManifest("pz2"))
+	wantErr := fmt.Errorf("disk full")
+	sess2.PackedZip(func() (*transfer.Manifest, error) { return nil, wantErr })
+	if _, err := sess2.PackedZip(func() (*transfer.Manifest, error) {
+		builds++
+		return transfer.NewManifest("x"), nil
+	}); err != wantErr {
+		t.Errorf("second call err = %v, want the cached %v", err, wantErr)
+	}
+}

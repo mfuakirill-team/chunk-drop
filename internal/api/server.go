@@ -12,6 +12,7 @@ import (
 	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
+	"chunkdrop/internal/upload"
 )
 
 // Wire constants (docs/PROTOCOL.md §1, §4).
@@ -52,6 +53,14 @@ type Server struct {
 
 	// Sync is this engine's shared folder (auto-transfer, #6).
 	Sync *syncmesh.Local
+
+	// Uploads is the phone→PC push state (M1, PROTOCOL.md §4 upload
+	// table); nil disables the upload routes. UploadDest is where
+	// finished uploads land (the sync folder by default), and
+	// MaxUploadBytes caps one upload (engine.toml, 100 GiB default).
+	Uploads        *upload.Manager
+	UploadDest     string
+	MaxUploadBytes int64
 
 	// SyncStart registers a sync serving session (#6 pull side).
 	SyncStart func(*syncmesh.Session) error
@@ -106,6 +115,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/manifest.webmanifest", s.uiHandler(false))
 	mux.Handle("/", s.localOnly(s.uiHandler(false)))
 	mux.Handle("/r/", s.uiHandler(true))
+	// /u/ is the phone→PC push page (M1): public like /r/ — the upload
+	// key lives in the fragment; no dashboard-back affordance there.
+	mux.Handle("/u/", s.uiStrip("/u/"))
 
 	// Authenticated receiver endpoints (PROTOCOL.md §4) — must work
 	// from other devices: they carry the per-transfer session key.
@@ -132,6 +144,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sync/state", s.authStart(s.handleSyncState))
 	mux.HandleFunc("POST /api/sync/start", s.authStart(s.handleSyncStart))
 
+	// Phone→PC push (M1, PROTOCOL.md §4 upload table). Slot creation
+	// is dashboard control (local-only + group key); the upload itself
+	// is gated by the upload key the dashboard handed out, exactly like
+	// a receive session.
+	mux.Handle("POST /api/upload/new", s.localOnly(s.authStart(s.handleUploadNew)))
+	mux.Handle("POST /api/upload/close", s.localOnly(s.authStart(s.handleUploadClose)))
+	mux.HandleFunc("POST /api/upload/start", s.authUpload(s.handleUploadStart))
+	mux.HandleFunc("PUT /api/upload/{uploadId}/chunk/{f}/{c}", s.authUpload(s.handleUploadChunk))
+	mux.HandleFunc("POST /api/upload/{uploadId}/finish", s.authUpload(s.handleUploadFinish))
+
 	return mux
 }
 
@@ -150,4 +172,16 @@ func (s *Server) uiHandler(strip bool) http.Handler {
 		return http.StripPrefix("/r/", s.UI)
 	}
 	return s.UI
+}
+
+// uiStrip serves the app under a subpath mount (e.g. /u/) with the
+// prefix removed so index.html resolves. The mount itself is public —
+// its key lives in the URL fragment.
+func (s *Server) uiStrip(prefix string) http.Handler {
+	if s.UI == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "web app not embedded (build web/dist first)", http.StatusNotFound)
+		})
+	}
+	return http.StripPrefix(prefix, s.UI)
 }
