@@ -343,9 +343,11 @@ any path and open dialogs on the engine PC — a remote control surface
 is an attack vector). Another device gets the generic `404` even with
 the correct group key, and that includes `/api/peers`, `/api/activity`,
 `/api/start`, `/api/pick/*`, and the dashboard at `/`. Receiving (`/r/`
-links) is unaffected. If you really need the dashboard from another
-device (headless NAS), set `allow_remote_dashboard = true` in
-`engine.toml` and restart — it stays group-key gated.
+links) is unaffected — the page and its static bundle (`/assets/*`,
+`/icons/*`) stay public, only the dashboard entry is guarded. If you
+really need the dashboard from another device (headless NAS), set
+`allow_remote_dashboard = true` in `engine.toml` and restart — it stays
+group-key gated.
 
 Otherwise: you're talking to an **old engine binary**. All dashboard
 routes shipped in M0.1–M0.2; a `404` there means the route doesn't

@@ -95,6 +95,15 @@ func (s *Server) Handler() http.Handler {
 	// dashboard entry is local-only (below); the receive page is the
 	// remote surface and stays public (the session key lives in the
 	// URL fragment).
+	//
+	// Static files are public: the receive page's HTML references them
+	// by absolute path (/assets/…, /icons/…, /manifest.webmanifest), and
+	// it must render on other devices. The bundle holds no secrets, and
+	// /r/assets/… could already reach it through the unguarded /r/ mount.
+	// Only the dashboard *entry* and the control APIs are local-only.
+	mux.Handle("/assets/", s.uiHandler(false))
+	mux.Handle("/icons/", s.uiHandler(false))
+	mux.Handle("/manifest.webmanifest", s.uiHandler(false))
 	mux.Handle("/", s.localOnly(s.uiHandler(false)))
 	mux.Handle("/r/", s.uiHandler(true))
 

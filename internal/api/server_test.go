@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ import (
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/transfer"
+	"chunkdrop/internal/webui"
 )
 
 // Auth + endpoint behavior tests (docs/M0-TASKS.md steps 5–6,
@@ -420,6 +422,14 @@ func TestDashboardLocalOnly(t *testing.T) {
 	if rec := do("GET", "/r/", remote, ""); rec.Code != http.StatusOK {
 		t.Errorf("remote /r/ = %d, want 200", rec.Code)
 	}
+	// The receive page references its bundle by absolute path, so the
+	// static files must stay public — otherwise a phone gets the HTML
+	// and 404s for every asset (blank page).
+	for _, p := range []string{"/assets/index.js", "/icons/icon-192.png", "/manifest.webmanifest"} {
+		if rec := do("GET", p, remote, ""); rec.Code != http.StatusOK {
+			t.Errorf("remote %s = %d, want 200 (receive page assets must load)", p, rec.Code)
+		}
+	}
 	if rec := do("GET", "/api/sync/state", remote, srv.GroupKey); rec.Code != http.StatusOK {
 		t.Errorf("remote sync state = %d, want 200 (mesh must keep working)", rec.Code)
 	}
@@ -434,3 +444,39 @@ func TestDashboardLocalOnly(t *testing.T) {
 		t.Errorf("allow_remote_dashboard without key = %d, want 401", rec.Code)
 	}
 }
+
+// Regression for the blank receive page: the receive page is public,
+// but its bundle is referenced by absolute path (/assets/…), which used
+// to fall into the local-only catch-all — a phone got the HTML and 404
+// for every asset. Serve the real embedded app, hit /r/ from a remote
+// address, and fetch every asset the page references.
+func TestReceivePageAssetsLoadRemotely(t *testing.T) {
+	srv := NewServer(session.NewManager(), webui.Handler())
+	srv.GroupKey = "group-secret-group-secret-group!!"
+	h := srv.Handler()
+
+	fetch := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "192.0.2.50:5000" // another device on the LAN
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	page := fetch("/r/")
+	if page.Code != http.StatusOK {
+		t.Fatalf("remote GET /r/ = %d, want 200", page.Code)
+	}
+	refs := assetRefRE.FindAllStringSubmatch(page.Body.String(), -1)
+	if len(refs) == 0 {
+		t.Fatalf("receive page references no assets: %.200q", page.Body.String())
+	}
+	for _, m := range refs {
+		if rec := fetch(m[1]); rec.Code != http.StatusOK || rec.Body.Len() == 0 {
+			t.Errorf("remote GET %s = %d (%d bytes), want 200 with content",
+				m[1], rec.Code, rec.Body.Len())
+		}
+	}
+}
+
+var assetRefRE = regexp.MustCompile(`(?:src|href)="(/assets/[^"]+|/icons/[^"]+|/manifest\.webmanifest)"`)

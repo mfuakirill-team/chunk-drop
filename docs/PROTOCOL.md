@@ -105,6 +105,7 @@ devices by design.
 | Method & path | Purpose |
 |---|---|
 | 🔒 `GET /` | Dashboard web app (local-only) |
+| `GET /assets/*`, `/icons/*`, `/manifest.webmanifest` | Static bundle for both pages — **public**: the receive page references it by absolute path and must render on other devices (no secrets inside; also reachable via the unguarded `/r/` mount) |
 | 🔒 `POST /api/start` | Create a transfer session from engine-local paths; body `{"paths":["…"],"zip":bool}` |
 | 🔒 `POST /api/pick/files` | Open a native multi-file dialog **on the engine**, return chosen paths |
 | 🔒 `POST /api/pick/folder` | Same, for a recursive folder pick |
