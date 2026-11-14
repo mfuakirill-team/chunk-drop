@@ -46,6 +46,12 @@ type Config struct {
 
 	// MaxUploadBytes caps a single upload transfer (M1); 0 = default 100 GiB.
 	MaxUploadBytes int64 `toml:"max_upload_bytes"`
+
+	// AllowRemoteDashboard opens the dashboard/control surface (session
+	// creation, file pickers, peers, activity) to other devices. Off by
+	// default: the dashboard controls this PC, so only this machine may
+	// use it; receiving links always work from other devices.
+	AllowRemoteDashboard bool `toml:"allow_remote_dashboard"`
 }
 
 // Default returns the built-in defaults (used when no config file exists —

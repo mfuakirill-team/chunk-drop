@@ -60,6 +60,12 @@ type Server struct {
 	// (#1.3): uploads (serving), downloads (sync), deletes, errors.
 	// Nil = events are dropped (callers need no guards).
 	Activity *activity.Log
+
+	// AllowRemoteDashboard disables the local-only guard on the
+	// dashboard/control routes (engine.toml: allow_remote_dashboard).
+	// Default false: only this machine may control the PC; receiving
+	// links from other devices keep working either way.
+	AllowRemoteDashboard bool
 }
 
 // Picker abstracts the native dialog surface (internal/picker).
@@ -85,34 +91,37 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// The web app (embedded web/dist): sender dashboard at /,
-	// receive page at /r/ (one page, two modes — app.tsx).
-	mux.Handle("/", s.uiHandler(false))
+	// receive page at /r/ (one page, two modes — app.tsx). The
+	// dashboard entry is local-only (below); the receive page is the
+	// remote surface and stays public (the session key lives in the
+	// URL fragment).
+	mux.Handle("/", s.localOnly(s.uiHandler(false)))
 	mux.Handle("/r/", s.uiHandler(true))
 
-	// Authenticated receiver endpoints (PROTOCOL.md §4).
+	// Authenticated receiver endpoints (PROTOCOL.md §4) — must work
+	// from other devices: they carry the per-transfer session key.
 	mux.HandleFunc("GET /api/manifest", s.auth(s.handleManifest))
 	mux.HandleFunc("GET /api/chunk/{f}/{c}", s.auth(s.handleChunk))
 	mux.HandleFunc("POST /api/progress", s.auth(s.handleProgress))
 	mux.HandleFunc("POST /api/cancel", s.auth(s.handleCancel))
 	mux.HandleFunc("GET /api/session", s.auth(s.handleSession))
 
-	// Sender-side (same-origin dashboard): create a session from
-	// picked paths, gated by the group key.
-	mux.HandleFunc("POST /api/start", s.authStart(s.handleStart))
+	// Sender-side control (create a session from picked paths) —
+	// local-only + group key: the dashboard controls this PC.
+	mux.Handle("POST /api/start", s.localOnly(s.authStart(s.handleStart)))
 
-	// Native pick dialogs on the engine machine (#1) — group-key
-	// gated: LAN strangers must not open dialogs on our desktop.
-	mux.HandleFunc("POST /api/pick/files", s.authStart(s.handlePickFiles))
-	mux.HandleFunc("POST /api/pick/folder", s.authStart(s.handlePickFolder))
+	// Native pick dialogs on the engine machine (#1) — local-only +
+	// group key: no remote dialog popping on our desktop.
+	mux.Handle("POST /api/pick/files", s.localOnly(s.authStart(s.handlePickFiles)))
+	mux.Handle("POST /api/pick/folder", s.localOnly(s.authStart(s.handlePickFolder)))
 
-	// LAN peers panel (#7) + sync endpoints (#6), group-key gated.
-	mux.HandleFunc("GET /api/peers", s.authStart(s.handlePeers))
+	// LAN peers panel (#7) + activity feed (#1.3) — local-only: they
+	// name local files and peers. Sync endpoints (#6) stay reachable by
+	// peer engines (that is the mesh; group key is the gate).
+	mux.Handle("GET /api/peers", s.localOnly(s.authStart(s.handlePeers)))
+	mux.Handle("GET /api/activity", s.localOnly(s.authStart(s.handleActivity)))
 	mux.HandleFunc("GET /api/sync/state", s.authStart(s.handleSyncState))
 	mux.HandleFunc("POST /api/sync/start", s.authStart(s.handleSyncStart))
-
-	// Activity feed (#1.3): concise what's-uploading/downloading lines.
-	// Same group-key gate as its siblings (it names local files).
-	mux.HandleFunc("GET /api/activity", s.authStart(s.handleActivity))
 
 	return mux
 }

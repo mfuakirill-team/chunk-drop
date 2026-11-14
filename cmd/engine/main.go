@@ -146,6 +146,8 @@ func run(portFlag int, bindFlag string) error {
 	srv.GroupKey = cfg.GroupKey
 	srv.Picker = pickerAdapters{}
 	srv.Activity = act // #1.3: concise feed → dashboard status panel
+	// Dashboard is local-only by default (it controls this PC).
+	srv.AllowRemoteDashboard = cfg.AllowRemoteDashboard
 
 	// LAN discovery (#5/#7): UDP broadcast beacons authenticated by
 	// an HMAC of the group key; inactive when no key is configured.

@@ -12,6 +12,7 @@
 | Adversary | Capability | Mitigation | Status |
 |---|---|---|---|
 | Stranger on the LAN | Sees QR-less traffic, probes engine port | Session key required on every endpoint (constant-time compare); no directory listing; unknown session → `401`/`404` generic | M0 |
+| Stranger on the LAN (or a compromised device) | Wants to *control* the engine PC: start sessions from arbitrary paths, open dialogs, read local file names/peers | **Dashboard/control surface is local-only**: only requests whose source address is this machine (loopback or its own interface addresses) reach `/`, `/api/start`, `/api/pick/*`, `/api/peers`, `/api/activity` — everyone else gets the generic `404`, even with the group key. Receiving links (`/r/`, session endpoints) stay remote by design; the engine↔engine mesh (`/api/sync/*`) stays remote behind the group key. `allow_remote_dashboard` is an explicit opt-out (still key-gated) | M0 |
 | Stranger on the LAN with a sniffer | Reads WiFi frames (plain HTTP) | **Accepted risk until M5** (home WiFi: fine). M5: TLS with self-signed cert, fingerprint pinned inside the QR | accepted → M5 |
 | Stranger on the internet | Hits the VPS hub | Rooms require the group key at creation; codes are 30 bits + a room secret; rate-limited creation; hub stores nothing | M2 |
 | Malicious "receiver" with a valid QR link | Gets exactly the files that session offers — nothing more | Sessions are scoped per transfer; engine exposes no filesystem beyond the manifest | M0 |

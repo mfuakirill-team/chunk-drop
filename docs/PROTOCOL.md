@@ -90,15 +90,28 @@ These act on the engine's own desktop/filesystem, so they require the
 long-term **group key** (constant-time compare, fail closed when no
 key is configured). Wrong key → `401` with the same generic body.
 
+**Dashboard routes are also local-only by default** (marked 🔒): the
+request's source address must be this machine — loopback or one of its
+own interface addresses (a local browser reaches the engine via its LAN
+IP). Anything else gets the generic `404` before authentication runs,
+even with the correct group key: the dashboard can point a session at
+arbitrary paths and open native dialogs, so exposing it to other
+devices is an attack vector. `allow_remote_dashboard = true` in
+engine.toml opts out (still group-key gated). The engine↔engine sync
+routes are *not* local-only — they are the mesh and are gated by the
+group key alone; receiver routes (§4.2) are reachable from other
+devices by design.
+
 | Method & path | Purpose |
 |---|---|
-| `POST /api/start` | Create a transfer session from engine-local paths; body `{"paths":["…"],"zip":bool}` |
-| `POST /api/pick/files` | Open a native multi-file dialog **on the engine**, return chosen paths |
-| `POST /api/pick/folder` | Same, for a recursive folder pick |
-| `GET /api/peers` | LAN discovery view: `{"self":{…},"peers":[{id,name,ip,port}…]}` |
+| 🔒 `GET /` | Dashboard web app (local-only) |
+| 🔒 `POST /api/start` | Create a transfer session from engine-local paths; body `{"paths":["…"],"zip":bool}` |
+| 🔒 `POST /api/pick/files` | Open a native multi-file dialog **on the engine**, return chosen paths |
+| 🔒 `POST /api/pick/folder` | Same, for a recursive folder pick |
+| 🔒 `GET /api/peers` | LAN discovery view: `{"self":{…},"peers":[{id,name,ip,port}…]}` |
 | `GET /api/sync/state` | This engine's shared-folder announcement: `{"files":{rel:{size,mtime,xxh}},"deleted":{rel:mtime}}` |
 | `POST /api/sync/start` | Body `{"rels":["…"]}` → session serving those files for a peer |
-| `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries]}` |
+| 🔒 `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries]}` |
 
 Sync normative details:
 - **In-progress pull temp files are never announced or planned.** A

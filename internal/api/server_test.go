@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,6 +45,7 @@ func newTestServer(t *testing.T) (*Server, *session.Session, string) {
 func get(t *testing.T, h http.Handler, path, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.RemoteAddr = testLocalAddr
 	if key != "" {
 		req.Header.Set(HeaderKey, key)
 	}
@@ -55,6 +57,7 @@ func get(t *testing.T, h http.Handler, path, key string) *httptest.ResponseRecor
 func post(t *testing.T, h http.Handler, path, key, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.RemoteAddr = testLocalAddr
 	if key != "" {
 		req.Header.Set(HeaderKey, key)
 	}
@@ -315,6 +318,7 @@ func doReq(t *testing.T, h http.Handler, method, path, key, body string) *httpte
 		rdr = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, path, rdr)
+	req.RemoteAddr = testLocalAddr
 	if key != "" {
 		req.Header.Set(HeaderKey, key)
 	}
@@ -345,5 +349,88 @@ func TestStartRequiresGroupKey(t *testing.T) {
 	}
 	if rec := post(t, h, "/api/start", "group-secret-group-secret-group!!", `{"paths":[]}`); rec.Code != http.StatusBadRequest {
 		t.Errorf("start with no paths = %d, want 400", rec.Code)
+	}
+}
+
+// testLocalAddr marks test requests as coming from the engine machine:
+// the dashboard is local-only, so ordinary tests must look local.
+const testLocalAddr = "127.0.0.1:1234"
+
+// The dashboard controls this PC (arbitrary paths, native dialogs,
+// local file names), so other devices get the generic 404 on every
+// dashboard/control route — even with the correct group key. The
+// receiver surface and the engine-to-engine sync mesh stay reachable.
+func TestDashboardLocalOnly(t *testing.T) {
+	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ui")
+	})
+	srv := NewServer(session.NewManager(), stub)
+	srv.GroupKey = "group-secret-group-secret-group!!"
+	srv.Discovery = discoveryServiceStub{}
+	dir := t.TempDir()
+	local, err := syncmesh.NewLocal(dir, "testbox", "eng1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Sync = local
+	h := srv.Handler()
+
+	do := func(method, path, remote, key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.RemoteAddr = remote
+		if key != "" {
+			req.Header.Set(HeaderKey, key)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	const remote = "192.0.2.50:5000"
+
+	// Dashboard/control routes: invisible from another device.
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/"},
+		{"POST", "/api/start"},
+		{"POST", "/api/pick/files"},
+		{"POST", "/api/pick/folder"},
+		{"GET", "/api/peers"},
+		{"GET", "/api/activity"},
+	} {
+		if rec := do(c.method, c.path, remote, srv.GroupKey); rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s from %s = %d, want 404", c.method, c.path, remote, rec.Code)
+		}
+	}
+
+	// Loopback works.
+	if rec := do("GET", "/api/peers", "127.0.0.1:5000", srv.GroupKey); rec.Code != http.StatusOK {
+		t.Errorf("loopback peers = %d, want 200", rec.Code)
+	}
+	// So does the host's own LAN address (the local browser's source).
+	oldAddrs := interfaceAddrs
+	interfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("203.0.113.7"), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	t.Cleanup(func() { interfaceAddrs = oldAddrs })
+	if rec := do("GET", "/api/activity", "203.0.113.7:5000", srv.GroupKey); rec.Code != http.StatusOK {
+		t.Errorf("own LAN address activity = %d, want 200", rec.Code)
+	}
+
+	// Receiving from other devices is unchanged: the /r/ page and the
+	// sync mesh endpoints stay open (group/session keys still gate them).
+	if rec := do("GET", "/r/", remote, ""); rec.Code != http.StatusOK {
+		t.Errorf("remote /r/ = %d, want 200", rec.Code)
+	}
+	if rec := do("GET", "/api/sync/state", remote, srv.GroupKey); rec.Code != http.StatusOK {
+		t.Errorf("remote sync state = %d, want 200 (mesh must keep working)", rec.Code)
+	}
+
+	// Opt-in escape hatch: allow_remote_dashboard re-opens the dashboard
+	// (still group-key gated) for headless engines like a NAS.
+	srv.AllowRemoteDashboard = true
+	if rec := do("GET", "/api/peers", remote, srv.GroupKey); rec.Code != http.StatusOK {
+		t.Errorf("allow_remote_dashboard peers = %d, want 200", rec.Code)
+	}
+	if rec := do("GET", "/api/peers", remote, ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("allow_remote_dashboard without key = %d, want 401", rec.Code)
 	}
 }

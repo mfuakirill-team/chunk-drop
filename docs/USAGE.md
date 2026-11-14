@@ -99,6 +99,7 @@ Edit `engine.toml`; restart the engine after changes.
 |---|---|---|
 | `port` | `8090` | TCP port the server binds. |
 | `bind_ip` | *(auto)* | LAN address to advertise in QR links. Only set it if auto-detect picks the wrong adapter (common with VPNs — see §5.4). |
+| `allow_remote_dashboard` | `false` | Dashboard/control access from **other devices**. Off: the dashboard works only on the engine machine itself (loopback or its own LAN address); other devices get a 404 even with the group key. Turn on only for headless engines (e.g. a NAS whose dashboard you open from a laptop). Receiving links always work from other devices regardless. |
 | `receive_dir` | *(M1)* | Where received uploads land (upload direction ships in M1). |
 | `max_upload_bytes` | `106253862144` | Per-transfer upload cap (M1). Ignore for now. |
 
@@ -187,6 +188,11 @@ environment:
 
 Caveats specific to Docker:
 
+- **The dashboard is local-only by default** (SECURITY.md §2): inside a
+  container, "local" means the container itself, so opening the
+  dashboard from your workstation gets a `404`. For a headless NAS
+  engine, add `allow_remote_dashboard = true` to `engine.toml` (still
+  required: the group key). Receiving links work regardless.
 - **QR links advertise the container's LAN IP** — with
   `network_mode: host` (or `-net=host`) the engine sees the real LAN
   and QRs work as on a bare-metal host; with the default bridge you
@@ -331,12 +337,22 @@ fetches the app from the engine the first time.
 
 ### 5.0 "404" on `/api/peers` (or any dashboard API) from a device
 
-You're talking to an **old engine binary**. All dashboard routes
-(`/api/peers`, `/api/activity`, `/api/sync/*`, `/api/pick/*`) shipped
-in M0.1–M0.2; a `404` means the route doesn't exist there. A wrong
-*key* answers `401`, never `404`. Fix: rebuild and restart the engine,
-and hard-refresh the page (`Ctrl+Shift+R`) to drop the cached old web
-app. In Docker: `docker compose -f deploy/docker-compose.yml up -d --build`.
+First check: **are you on another device?** The dashboard/control
+surface is local-only by default (the dashboard can point a session at
+any path and open dialogs on the engine PC — a remote control surface
+is an attack vector). Another device gets the generic `404` even with
+the correct group key, and that includes `/api/peers`, `/api/activity`,
+`/api/start`, `/api/pick/*`, and the dashboard at `/`. Receiving (`/r/`
+links) is unaffected. If you really need the dashboard from another
+device (headless NAS), set `allow_remote_dashboard = true` in
+`engine.toml` and restart — it stays group-key gated.
+
+Otherwise: you're talking to an **old engine binary**. All dashboard
+routes shipped in M0.1–M0.2; a `404` there means the route doesn't
+exist. A wrong *key* answers `401`, never `404`. Fix: rebuild and
+restart the engine, and hard-refresh the page (`Ctrl+Shift+R`) to drop
+the cached old web app. In Docker:
+`docker compose -f deploy/docker-compose.yml up -d --build`.
 
 ### 5.1 "Receiver's browser says it can't reach / connection refused"
 
