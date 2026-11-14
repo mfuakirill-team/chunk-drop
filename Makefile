@@ -1,0 +1,50 @@
+# ChunkDrop — M0 build targets.
+# Every milestone ends in something usable (docs/PLAN.md §3).
+
+GO ?= go
+NODE ?= npm
+
+# Static binaries, no cgo, stripped (SmartScreen note in docs/PLAN.md §5).
+LDFLAGS := -s -w
+BUILDFLAGS := -trimpath -ldflags="$(LDFLAGS)"
+
+.PHONY: all web engine engine-win engine-linux engine-mac test clean help
+
+all: engine
+
+## web: build the Preact app into web/dist and sync for go:embed
+web:
+	cd web && $(NODE) ci --silent 2>/dev/null || $(NODE) install --silent
+	cd web && $(NODE) run build
+	@# go:embed can't reach web/dist from internal/webdist — sync it.
+	@rm -rf internal/webdist/dist && mkdir -p internal/webdist/dist
+	@cp -a web/dist/. internal/webdist/dist/
+
+## engine: build the engine binary for the current platform
+engine: web
+	$(GO) build $(BUILDFLAGS) -o bin/engine ./cmd/engine
+
+## engine-win: cross-compile Windows amd64 (the group's daily driver)
+engine-win: web
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) build $(BUILDFLAGS) -o bin/engine-windows-amd64.exe ./cmd/engine
+
+## engine-linux: cross-compile Linux amd64 + arm64 (NAS, later)
+engine-linux: web
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build $(BUILDFLAGS) -o bin/engine-linux-amd64 ./cmd/engine
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) build $(BUILDFLAGS) -o bin/engine-linux-arm64 ./cmd/engine
+
+## engine-mac: untested, but free (docs/PLAN.md §4)
+engine-mac: web
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GO) build $(BUILDFLAGS) -o bin/engine-darwin-arm64 ./cmd/engine
+
+## test: unit tests (transfer rules, session, api, lanip)
+test:
+	$(GO) test ./...
+
+## clean: build artifacts
+clean:
+	rm -rf bin internal/webdist/dist
+	mkdir -p internal/webdist/dist
+
+help:
+	@grep -E '^##' $(MAKEFILE_LIST) | sed 's/## //'
