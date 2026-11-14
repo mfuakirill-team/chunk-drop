@@ -5,6 +5,7 @@ import type { ComponentChild } from "preact";
 // mode switch for manual key entry (M0-TASKS.md steps 7–8).
 
 import { parseFragmentKey } from "./link";
+import { PeersPanel } from "./peers";
 import { ReceivePage } from "./receive";
 import { SendPage } from "./send";
 import { setFragment } from "./link";
@@ -34,7 +35,10 @@ export function App() {
       {mode === "receive" ? (
         <ReceivePage sessionKey={key} onBack={goSend} />
       ) : (
-        <SendPage onStart={goReceive} />
+        <div class="columns">
+          <SendPage onStart={goReceive} />
+          <PeersPanel />
+        </div>
       )}
       <footer class="muted">
         <p>

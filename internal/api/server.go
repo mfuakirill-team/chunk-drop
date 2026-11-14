@@ -1,9 +1,16 @@
+// Package api wires the engine's HTTP handlers: receiver endpoints
+// (PROTOCOL.md §4), the sender dashboard's start endpoint, native pick
+// dialogs (#1), LAN peer discovery view (#7) and the syncmesh
+// endpoints (#6). All /api/sync* and /api/pick routes are gated by
+// the group key — engines are group members, receivers are not.
 package api
 
 import (
 	"net/http"
 
+	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/session"
+	"chunkdrop/internal/syncmesh"
 )
 
 // Wire constants (docs/PROTOCOL.md §1, §4).
@@ -28,11 +35,38 @@ const (
 type Server struct {
 	Sessions *session.Manager
 
-	// GroupKey (engine config) gates session creation (sender side).
+	// GroupKey (engine config) gates session creation and all
+	// engine-to-engine routes (pick, sync, discovery view).
 	GroupKey string
 
 	// UI serves the embedded web app (nil = no embedded UI yet).
 	UI http.Handler
+
+	// Picker opens native file dialogs on the engine (#1). Injected,
+	// nil disables the pick endpoints (paste-paths still works).
+	Picker Picker
+
+	// Discovery lists LAN peers for the dashboard panel (#7).
+	Discovery PeersSource
+
+	// Sync is this engine's shared folder (auto-transfer, #6).
+	Sync *syncmesh.Local
+
+	// SyncStart registers a sync serving session (#6 pull side).
+	SyncStart func(*syncmesh.Session) error
+}
+
+// Picker abstracts the native dialog surface (internal/picker).
+type Picker interface {
+	PickFiles() ([]string, error)
+	PickFolder() ([]string, error)
+}
+
+// PeersSource is the read side of discovery the server needs (#7).
+// Satisfied by *discovery.Service; stubbed in tests.
+type PeersSource interface {
+	Self() discovery.Beacon
+	Table() *discovery.Table
 }
 
 // NewServer builds the handler tree.
@@ -59,6 +93,16 @@ func (s *Server) Handler() http.Handler {
 	// Sender-side (same-origin dashboard): create a session from
 	// picked paths, gated by the group key.
 	mux.HandleFunc("POST /api/start", s.authStart(s.handleStart))
+
+	// Native pick dialogs on the engine machine (#1) — group-key
+	// gated: LAN strangers must not open dialogs on our desktop.
+	mux.HandleFunc("POST /api/pick/files", s.authStart(s.handlePickFiles))
+	mux.HandleFunc("POST /api/pick/folder", s.authStart(s.handlePickFolder))
+
+	// LAN peers panel (#7) + sync endpoints (#6), group-key gated.
+	mux.HandleFunc("GET /api/peers", s.authStart(s.handlePeers))
+	mux.HandleFunc("GET /api/sync/state", s.authStart(s.handleSyncState))
+	mux.HandleFunc("POST /api/sync/start", s.authStart(s.handleSyncStart))
 
 	return mux
 }

@@ -30,15 +30,16 @@ func TestCandidatesExcludesLoopback(t *testing.T) {
 
 func TestPick(t *testing.T) {
 	if Pick(nil) != nil {
-		t.Error("no candidates must not auto-pick")
+		t.Fatal("no candidates must not auto-pick")
 	}
 	one := []Candidate{{IP: "192.168.1.5", Interface: "eth0"}}
 	if p := Pick(one); p == nil || p.IP != "192.168.1.5" {
-		t.Errorf("single candidate not auto-picked: %v", p)
+		t.Fatalf("single candidate not auto-picked: %v", p)
 	}
-	two := []Candidate{{IP: "192.168.1.5"}, {IP: "10.0.0.3"}}
-	if Pick(two) != nil {
-		t.Error("two candidates must force the picker")
+	// Two candidates: the RFC1918 one wins (VPN adapters lose).
+	two := []Candidate{{IP: "172.20.1.9", Interface: "tun0"}, {IP: "192.168.1.5", Interface: "eth0"}}
+	if p := Pick(two); p == nil || p.IP != "192.168.1.5" {
+		t.Fatalf("private LAN not preferred over VPN: %v", p)
 	}
 }
 
@@ -47,8 +48,8 @@ func TestBindAddr(t *testing.T) {
 	if got := BindAddr(cs, "192.168.1.5", 8090); got != "192.168.1.5:8090" {
 		t.Errorf("BindAddr = %q", got)
 	}
-	// Unknown chosen IP → fall back to all interfaces.
-	if got := BindAddr(cs, "10.9.9.9", 8090); got != "0.0.0.0:8090" {
+	// Pinned advertise IP wins even when not enumerated (VPN edge).
+	if got := BindAddr(cs, "10.9.9.9", 8090); got != "10.9.9.9:8090" {
 		t.Errorf("BindAddr fallback = %q", got)
 	}
 }

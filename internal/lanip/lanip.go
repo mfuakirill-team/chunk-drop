@@ -1,36 +1,41 @@
-// Package lanip enumerates the machine's LAN candidate addresses for
-// the QR link (docs/ARCHITECTURE.md §1: "VPN adapters are the classic
-// trap" — multiple candidates go to a UI picker).
+// Package lanip enumerates LAN IPv4 candidates, picks one, binds, and
+// answers "is this a desktop session?" for browser/dialog opening.
 package lanip
 
 import (
+	"fmt"
 	"net"
-	"sort"
+	"os"
+	"runtime"
+	"strings"
 )
 
-// Candidate is one non-loopback IPv4 address the engine could advertise.
+// BroadcastPort is the UDP port discovery beacons are sent to (fixed,
+// private protocol — ground rule #3: not BitTorrent, nothing to
+// interoperate with, nothing for ISPs to fingerprint).
+const BroadcastPort = 8091
+
+// Candidate is one LAN IPv4 address on an interface.
 type Candidate struct {
-	IP        string `json:"ip"`
-	Interface string `json:"interface"` // interface name, e.g. "en0", "eth3"
+	IP        string
+	Interface string
 }
 
-// Candidates enumerates non-loopback IPv4 unicast addresses.
-// Loopback, link-local (169.254.*) and IPv6 are excluded — QR links
-// need a routable LAN address.
+// Candidates lists non-loopback IPv4 addresses of up interfaces.
+// Loopback is never a useful advertise target on the LAN.
 func Candidates() ([]Candidate, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
 	}
 	var out []Candidate
-	seen := map[string]bool{}
-	for _, ifi := range ifaces {
-		if ifi.Flags&net.FlagLoopback != 0 || ifi.Flags&net.FlagUp == 0 {
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		addrs, err := ifi.Addrs()
+		addrs, err := ifc.Addrs()
 		if err != nil {
-			continue // one bad interface must not kill the enumeration
+			continue
 		}
 		for _, a := range addrs {
 			ipn, ok := a.(*net.IPNet)
@@ -38,55 +43,128 @@ func Candidates() ([]Candidate, error) {
 				continue
 			}
 			ip := ipn.IP
-			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.To4() == nil {
+			if ip.To4() == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() {
 				continue
 			}
-			s := ip.String()
-			if !seen[s] {
-				seen[s] = true
-				out = append(out, Candidate{IP: s, Interface: ifi.Name})
-			}
+			out = append(out, Candidate{IP: ip.String(), Interface: ifc.Name})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].IP != out[j].IP {
-			return out[i].IP < out[j].IP
-		}
-		return out[i].Interface < out[j].Interface
-	})
 	return out, nil
 }
 
-// Pick returns the single candidate if exactly one exists — the
-// auto-pick path in the engine — or nil when a UI picker is needed.
-func Pick(cs []Candidate) *Candidate {
-	if len(cs) == 1 {
-		return &cs[0]
+// Pick returns the most plausible single LAN candidate (RFC1918
+// 10/192.168 first, then 172.16-31, then any IPv4), or nil when none.
+func Pick(cands []Candidate) *Candidate {
+	if len(cands) == 0 {
+		return nil
 	}
-	return nil
+	pref := func(ip string) int {
+		p := net.ParseIP(ip)
+		if p == nil || p.To4() == nil {
+			return 0
+		}
+		b := p.To4()
+		switch {
+		case b[0] == 10, b[0] == 192 && b[1] == 168:
+			return 2
+		case b[0] == 172 && b[1] >= 16 && b[1] <= 31:
+			return 1
+		}
+		return 0
+	}
+	best := -1
+	for i := range cands {
+		if best == -1 || pref(cands[i].IP) > pref(cands[best].IP) {
+			best = i
+		}
+	}
+	return &cands[best]
 }
 
-// BindAddr returns the host:port to bind the HTTP server to: the chosen
-// candidate IP when practical (SECURITY.md §6), else all interfaces.
-func BindAddr(cs []Candidate, chosen string, port int) string {
-	if chosen != "" {
-		for _, c := range cs {
-			if c.IP == chosen {
-				return net.JoinHostPort(c.IP, itoa(port))
+func isPrivateLAN(ip string) bool {
+	p := net.ParseIP(ip)
+	if p == nil || p.To4() == nil {
+		return false
+	}
+	b := p.To4()
+	return b[0] == 10 || b[0] == 192 && b[1] == 168 || b[0] == 172 && b[1] >= 16 && b[1] <= 31
+}
+
+// BindAddr chooses the address the HTTP server should bind: the picked
+// interface when unambiguous, else 0.0.0.0 (all interfaces).
+func BindAddr(cands []Candidate, advertise string, port int) string {
+	if advertise != "" {
+		return net.JoinHostPort(advertise, fmt.Sprintf("%d", port))
+	}
+	if pick := Pick(cands); pick != nil && len(cands) == 1 {
+		return net.JoinHostPort(pick.IP, fmt.Sprintf("%d", port))
+	}
+	return net.JoinHostPort("0.0.0.0", fmt.Sprintf("%d", port))
+}
+
+// BroadcastAddrs returns IPv4 broadcast addresses of LAN interfaces,
+// deduplicated — discovery beacons go there via UDP.
+func BroadcastAddrs() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipn.IP.To4()
+			if ip4 == nil || ipn.IP.IsLoopback() {
+				continue
+			}
+			bc := make(net.IP, len(ip4))
+			copy(bc, ip4)
+			for i := range bc {
+				bc[i] |= ^ipn.Mask[i]
+			}
+			s := bc.String()
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
 			}
 		}
 	}
-	return net.JoinHostPort("0.0.0.0", itoa(port))
+	return out
 }
 
-func itoa(p int) string {
-	if p == 0 {
-		return "0"
+// HasGUI reports whether this engine runs inside a desktop session —
+// i.e. browser auto-open (#4) and native pick dialogs (#1) can work.
+// Headless (SSH, service, container) → false; callers degrade to
+// printed URLs and paste-a-path picking.
+func HasGUI() bool {
+	if os.Getenv("SSH_TTY") != "" || os.Getenv("SSH_CONNECTION") != "" {
+		return false
 	}
-	digits := ""
-	for p > 0 {
-		digits = string(rune('0'+p%10)) + digits
-		p /= 10
+	if runtime.GOOS == "windows" {
+		return true // auto-open just fails silently if truly headless
 	}
-	return digits
+	return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+}
+
+// Hostname returns a short machine name for beacons and panels.
+func Hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	if i := strings.IndexByte(h, '.'); i > 0 {
+		h = h[:i]
+	}
+	return h
 }

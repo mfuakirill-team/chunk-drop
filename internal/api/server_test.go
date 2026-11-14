@@ -12,7 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/session"
+	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/transfer"
 )
 
@@ -35,6 +37,7 @@ func newTestServer(t *testing.T) (*Server, *session.Session, string) {
 		t.Fatal(err)
 	}
 	srv := NewServer(sm, nil)
+	srv.GroupKey = "" // receiver endpoints only; start/pick/sync stay closed
 	return srv, s, s.KeyEncoded()
 }
 
@@ -210,6 +213,123 @@ func TestUIMounts(t *testing.T) {
 	if rec := get(t, nilUI, "/", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("GET / with nil UI = %d, want 404", rec.Code)
 	}
+}
+
+// TestEngineExtrasGated: pick / peers / sync routes must be closed to
+// receivers (401) and open to a group member (#1, #6, #7).
+func TestEngineExtrasGated(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.GroupKey = "group-secret-group-secret-group!!"
+	syncDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(syncDir, "note.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	local, err := syncmesh.NewLocal(syncDir, "testbox", "eng1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Sync = local
+	srv.Discovery = discoveryServiceStub{}
+	h := srv.Handler()
+
+	// wrong/no key → 401 on every extra route
+	for _, req := range []struct {
+		method, path string
+	}{
+		{"POST", "/api/pick/files"},
+		{"POST", "/api/pick/folder"},
+		{"GET", "/api/peers"},
+		{"GET", "/api/sync/state"},
+		{"POST", "/api/sync/start"},
+	} {
+		if rec := reqNoKey(t, h, req.method, req.path); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without key = %d, want 401", req.method, req.path, rec.Code)
+		}
+		if rec := reqKey(t, h, req.method, req.path, "wrong-wrong-wrong-wrong-wrong"); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s wrong key = %d, want 401", req.method, req.path, rec.Code)
+		}
+	}
+
+	// group member: peers list works, sync state lists the file,
+	// sync start serves a session manifest for the file.
+	if rec := reqKey(t, h, "GET", "/api/peers", srv.GroupKey); rec.Code != http.StatusOK {
+		t.Fatalf("peers = %d", rec.Code)
+	}
+	rec := reqKey(t, h, "GET", "/api/sync/state", srv.GroupKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sync state = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"note.txt"`) {
+		t.Errorf("sync state missing note.txt: %s", rec.Body.String())
+	}
+	rec = reqKeyBody(t, h, "POST", "/api/sync/start", srv.GroupKey, `{"rels":["note.txt"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sync start = %d: %s", rec.Code, rec.Body.String())
+	}
+	var sr struct {
+		SessionID string             `json:"sessionId"`
+		Key       string             `json:"key"`
+		Manifest  *transfer.Manifest `json:"manifest"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &sr); err != nil {
+		t.Fatal(err)
+	}
+	if sr.Key == "" || sr.Manifest == nil || len(sr.Manifest.Files) != 1 || sr.Manifest.Files[0].Path != "note.txt" {
+		t.Fatalf("sync start resp = %+v", sr)
+	}
+	// the served session is fetchable via the receiver wire
+	rec = reqKey(t, h, "GET", "/api/manifest", sr.Key)
+	if rec.Code != http.StatusOK {
+		t.Errorf("manifest via sync session key = %d", rec.Code)
+	}
+	rec = reqKey(t, h, "GET", "/api/chunk/0/0", sr.Key)
+	if rec.Code != http.StatusOK || rec.Body.String() != "hi" {
+		t.Errorf("chunk via sync session = %d %q", rec.Code, rec.Body.String())
+	}
+
+	// picker routes: Picker == nil → 404 with a clear body
+	if rec := reqKey(t, h, "POST", "/api/pick/files", srv.GroupKey); rec.Code != http.StatusNotFound {
+		t.Errorf("pick files without picker = %d, want 404", rec.Code)
+	}
+}
+
+func reqNoKey(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doReq(t, h, method, path, "", "")
+}
+
+func reqKey(t *testing.T, h http.Handler, method, path, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doReq(t, h, method, path, key, "")
+}
+
+func reqKeyBody(t *testing.T, h http.Handler, method, path, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doReq(t, h, method, path, key, body)
+}
+
+func doReq(t *testing.T, h http.Handler, method, path, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	if key != "" {
+		req.Header.Set(HeaderKey, key)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+type discoveryServiceStub struct{}
+
+func (discoveryServiceStub) Self() discovery.Beacon {
+	return discovery.Beacon{ID: "self", Name: "stub", Port: 8090}
+}
+func (discoveryServiceStub) Table() *discovery.Table {
+	return &discovery.Table{}
 }
 
 func TestStartRequiresGroupKey(t *testing.T) {

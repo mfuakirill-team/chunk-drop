@@ -17,15 +17,20 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"chunkdrop/internal/api"
 	"chunkdrop/internal/config"
+	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/lanip"
+	"chunkdrop/internal/picker"
 	"chunkdrop/internal/session"
+	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/webui"
 )
 
@@ -132,7 +137,54 @@ func run(portFlag int, bindFlag string) error {
 	ui := webui.Handler()
 	srv := api.NewServer(sm, ui)
 	srv.GroupKey = cfg.GroupKey
+	srv.Picker = pickerAdapters{}
+
+	// LAN discovery (#5/#7): UDP broadcast beacons authenticated by
+	// an HMAC of the group key; inactive when no key is configured.
+	disc := discService(cfg, lanip.Hostname(), cfg.Port)
+	srv.Discovery = disc
 	handler := srv.Handler()
+
+	// Shared-folder auto-transfer (#6): only when a key is configured
+	// (the mesh is group-key gated — syncmesh never trusts strangers).
+	var syncStop = make(chan struct{})
+	var syncRunner *syncmesh.Runner
+	if cfg.GroupKey != "" && !strings.Contains(cfg.GroupKey, "<paste") {
+		dir, err := syncmesh.SyncDir()
+		if err != nil {
+			log.Printf("sync dir unavailable: %v", err)
+		} else {
+			log.Printf("sync folder: %s", dir)
+			local, err := syncmesh.NewLocal(dir, lanip.Hostname(), disc.Self().ID)
+			if err != nil {
+				log.Printf("sync scan failed: %v", err)
+			} else {
+				srv.Sync = local
+				puller := &syncmesh.Puller{GroupKey: cfg.GroupKey, Logf: log.Printf}
+				syncRunner = &syncmesh.Runner{
+					Local:    local,
+					Puller:   puller,
+					GroupKey: cfg.GroupKey,
+					Peers: func() []syncmesh.PeerRef {
+						var out []syncmesh.PeerRef
+						for _, m := range disc.Table().List() {
+							if m.ID == disc.Self().ID {
+								continue
+							}
+							out = append(out, syncmesh.PeerRef{
+								Host:     net.JoinHostPort(m.IP, fmt.Sprintf("%d", m.Port)),
+								EngineID: m.ID,
+								Name:     m.Name,
+							})
+						}
+						return out
+					},
+					Logf: log.Printf,
+				}
+				go syncRunner.Run(syncStop)
+			}
+		}
+	}
 
 	bindAddr := lanip.BindAddr(candidates, advertise, cfg.Port)
 	ln, err := net.Listen("tcp", bindAddr)
@@ -175,17 +227,33 @@ func run(portFlag int, bindFlag string) error {
 		}
 	}()
 
+	// Discovery beacons (#5/#7) — announce + listen until shutdown.
+	go func() { disc.Run() }()
+
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.Serve(ln) }()
 
 	fmt.Println()
 	fmt.Printf("  ChunkDrop engine ready\n")
 	fmt.Printf("  dashboard:  %s\n", url)
-	fmt.Printf("  receive:    %sr/#k=<session-key>\n", url)
+	fmt.Printf("  receive:    %s/r/#k=<session-key>\n", strings.TrimSuffix(url, "/"))
+	if srv.Sync != nil {
+		fmt.Printf("  sync dir:   %s\n", srv.Sync.Dir)
+	}
 	if len(candidates) > 1 {
 		fmt.Printf("  (%d LAN interfaces seen — use -bind to pin one)\n", len(candidates))
 	}
 	fmt.Println()
+
+	// #4: open the dashboard in the default browser when we run in a
+	// desktop session; headless (SSH/service/container) just prints.
+	if lanip.HasGUI() {
+		if err := openBrowser(url); err != nil {
+			log.Printf("browser open failed (%v) — open %s manually", err, url)
+		} else {
+			log.Printf("opened dashboard in browser: %s", url)
+		}
+	}
 
 	// Ctrl+C / SIGTERM: cancel sessions, exit clean (no state to save —
 	// sessions are RAM-only by design).
@@ -200,6 +268,8 @@ func run(portFlag int, bindFlag string) error {
 		}
 	}
 	close(reapStop)
+	close(syncStop)
+	disc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
@@ -208,4 +278,47 @@ func run(portFlag int, bindFlag string) error {
 
 func itoa(p int) string {
 	return fmt.Sprintf("%d", p)
+}
+
+// openBrowser opens the dashboard in the default browser (#4).
+// Windows: start the URL directly (ShellExecute path in cmd start).
+// Linux: xdg-open (with a browser fallback list for bare setups).
+// macOS: open(1).
+func openBrowser(url string) error {
+	switch runtime.GOOS {
+	case "windows":
+		return exec.Command("cmd", "/c", "start", "", strings.ReplaceAll(url, "&", "^&")).Run()
+	case "darwin":
+		return exec.Command("open", url).Run()
+	default:
+		for _, b := range []string{"xdg-open", "x-www-browser", "firefox", "chromium", "google-chrome"} {
+			if _, err := exec.LookPath(b); err != nil {
+				continue
+			}
+			if err := exec.Command(b, url).Start(); err == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("no browser launcher found")
+	}
+}
+
+// pickerAdapters adapts internal/picker to the api.Picker interface.
+type pickerAdapters struct{}
+
+func (pickerAdapters) PickFiles() ([]string, error)  { return picker.Files() }
+func (pickerAdapters) PickFolder() ([]string, error) { return picker.Folder() }
+
+// discService builds the discovery service (#5/#7); nil-safe when the
+// group key is unset (a keyless engine is a plain QR sender).
+func discService(cfg config.Config, name string, port int) *discovery.Service {
+	if cfg.GroupKey == "" || strings.Contains(cfg.GroupKey, "<paste") {
+		return &discovery.Service{} // inactive: Run just waits
+	}
+	s, err := discovery.NewService(cfg.GroupKey, name, port)
+	if err != nil {
+		log.Printf("discovery unavailable: %v (sync + peers panel off)", err)
+		return &discovery.Service{}
+	}
+	return s
 }

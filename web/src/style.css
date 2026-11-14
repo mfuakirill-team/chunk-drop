@@ -30,7 +30,12 @@ body {
   line-height: 1.5;
 }
 
-#app { max-width: 720px; margin: 0 auto; padding: 16px; }
+#app { max-width: 1080px; margin: 0 auto; padding: 16px; }
+
+/* #7: dashboard layout — send card(s) left, peers panel right. */
+@media (min-width: 900px) {
+  .columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 0 16px; align-items: start; }
+}
 
 header.site {
   display: flex;

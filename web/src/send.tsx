@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "preact/hooks";
 
 // Sender dashboard (M0-TASKS.md step 8): file/folder picker, QR with
 // the receive URL, copy-link fallback, live receiver progress polled
-// from /api/session.
+// from /api/session. Pick runs a native dialog on the engine (#1);
+// the group key persists in localStorage (#2).
 
 import { KEY_HEADER, type SessionInfo } from "./api";
 import { buildReceiveUrl } from "./link";
 import { renderQr } from "./qr";
+import { loadGroupKey, saveGroupKey } from "./storage";
 
 interface StartResponse {
   sessionId: string;
@@ -24,14 +26,20 @@ interface Props {
 export function SendPage({ onStart }: Props) {
   const [paths, setPaths] = useState<string[]>([]);
   const [zip, setZip] = useState(false);
-  const [groupKey, setGroupKey] = useState(
-    localStorage.getItem("chunkdrop.group_key") ?? "",
-  );
+  // #2: persisted group key; #3: plain input, not a password field.
+  const [groupKey, setGroupKey] = useState(loadGroupKey);
   const [started, setStarted] = useState<StartResponse | null>(null);
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pickBusy, setPickBusy] = useState(false);
+  const [manualPaths, setManualPaths] = useState("");
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const setKeyAndSave = (k: string) => {
+    setGroupKey(k);
+    saveGroupKey(k);
+  };
 
   useEffect(() => {
     if (!started) return;
@@ -54,26 +62,37 @@ export function SendPage({ onStart }: Props) {
     return () => clearInterval(t);
   }, [started]);
 
-  const pickFiles = async (dir: boolean) => {
+  // #1: native dialog on the engine machine — browsers cannot hand
+  // the server real paths (that was the "stat README.md" bug: the
+  // dashboard sent bare filenames).
+  const pickNative = async (folder: boolean) => {
+    setPickBusy(true);
+    setErr("");
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const w = window as any;
-      if (dir && w.showDirectoryPicker) {
-        const handle = await w.showDirectoryPicker();
-        const names: string[] = [];
-        await collectFiles(handle, handle.name, names, 200);
-        setPaths(names);
-        return;
-      }
-      const input = document.createElement("input");
-      input.type = "file";
-      input.multiple = true;
-      input.onchange = () => {
-        setPaths(Array.from(input.files ?? []).map((f) => (f as File & { path?: string }).path ?? f.name));
-      };
-      input.click();
-    } catch {
-      /* picker dismissed */
+      const r = await fetch(folder ? "/api/pick/folder" : "/api/pick/files", {
+        method: "POST",
+        headers: { [KEY_HEADER]: groupKey },
+      });
+      if (!r.ok) throw new Error(`picker → HTTP ${r.status}`);
+      const resp = (await r.json()) as { paths: string[] };
+      if (resp.paths && resp.paths.length > 0) setPaths(resp.paths);
+    } catch (e) {
+      setErr(
+        `Native picker failed (${e}) — paste absolute paths below instead.`,
+      );
+    } finally {
+      setPickBusy(false);
+    }
+  };
+
+  const applyManual = () => {
+    const list = manualPaths
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (list.length > 0) {
+      setPaths(list);
+      setManualPaths("");
     }
   };
 
@@ -97,7 +116,6 @@ export function SendPage({ onStart }: Props) {
       }
       const resp = (await r.json()) as StartResponse;
       setStarted(resp);
-      localStorage.setItem("chunkdrop.group_key", groupKey);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -112,12 +130,15 @@ export function SendPage({ onStart }: Props) {
       <div class="card">
         <h2 style="margin-top:0">Send</h2>
         <p class="muted">
-          Pick files or a folder. The receiver scans the QR (or opens the
-          link) and saves straight from their browser.
+          Pick files or a folder (a dialog opens on the engine machine),
+          or paste absolute paths. The receiver scans the QR (or opens
+          the link) and saves straight from the browser.
         </p>
         <p>
-          <button onClick={() => void pickFiles(false)}>Pick files…</button>{" "}
-          <button class="secondary" onClick={() => void pickFiles(true)}>
+          <button disabled={pickBusy} onClick={() => void pickNative(false)}>
+            {pickBusy ? "Opening dialog…" : "Pick files…"}
+          </button>{" "}
+          <button class="secondary" disabled={pickBusy} onClick={() => void pickNative(true)}>
             Pick folder…
           </button>{" "}
           <label style="margin-left:12px">
@@ -129,18 +150,36 @@ export function SendPage({ onStart }: Props) {
             pack many small files as store-mode ZIP
           </label>
         </p>
+        <p>
+          <input
+            type="text"
+            placeholder={"or paste paths, one per line\n/home/me/big.iso, D:\\movie.mkv"}
+            value={manualPaths}
+            onInput={(e) => setManualPaths((e.target as HTMLInputElement).value)}
+          />
+        </p>
+        <p>
+          <button class="secondary" onClick={applyManual} disabled={!manualPaths.trim()}>
+            Use pasted paths
+          </button>
+        </p>
         {paths.length > 0 && (
           <p class="muted">
             {paths.length} path{paths.length === 1 ? "" : "s"} selected
             {zip ? " → will be packed into bundle.zip (store mode)" : ""}
+            <br />
+            {paths.slice(0, 5).map((p) => (
+              <div style={{ overflowWrap: "anywhere" }}>{p}</div>
+            ))}
+            {paths.length > 5 ? `… +${paths.length - 5} more` : ""}
           </p>
         )}
         <p>
           <input
-            type="password"
-            placeholder="group key (engine keygen)"
+            type="text"
+            placeholder="group key (engine keygen) — saved in this browser"
             value={groupKey}
-            onInput={(e) => setGroupKey((e.target as HTMLInputElement).value)}
+            onInput={(e) => setKeyAndSave((e.target as HTMLInputElement).value)}
           />
         </p>
         <p>
@@ -212,18 +251,4 @@ async function fetchSessionWithId(id: string, key: string): Promise<SessionInfo>
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
-}
-
-async function collectFiles(
-  dir: { values: () => AsyncIterable<{ kind: string; name: string; getFileHandle?: unknown }> },
-  prefix: string,
-  out: string[],
-  cap: number,
-): Promise<void> {
-  // Collect up to `cap` paths from a directory handle (browser-side
-  // picking; the engine re-walks by absolute path server-side).
-  for await (const entry of dir.values()) {
-    if (out.length >= cap) return;
-    if (entry.kind === "file") out.push(`${prefix}/${entry.name}`);
-  }
 }

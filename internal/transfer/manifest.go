@@ -86,6 +86,54 @@ type BuildOptions struct {
 	ZipPath string
 }
 
+// SourcePair is an explicit (relative manifest path, absolute source)
+// pair — used by callers that resolve paths themselves (syncmesh),
+// bypassing the filesystem walk.
+type SourcePair struct {
+	Rel string // slash-separated, sanitized by BuildFromPairs
+	Abs string // absolute source path to hash/stream from
+}
+
+// BuildFromPairs builds a manifest from explicit pairs. Rels are
+// sanitized (PROTOCOL.md §8), size is taken from stat of Abs.
+func (m *Manifest) BuildFromPairs(pairs []SourcePair, opt BuildOptions) error {
+	chunkSize := int64(opt.ChunkSize)
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
+	}
+	m.ChunkSize = int(chunkSize)
+	m.PackedAsZip = false
+	m.Files = make([]File, 0, len(pairs))
+	for i, p := range pairs {
+		rel, err := SanitizePath(p.Rel)
+		if err != nil {
+			return fmt.Errorf("path %q: %w", p.Rel, err)
+		}
+		info, err := os.Stat(p.Abs)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", p.Abs, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s: not a regular file", p.Abs)
+		}
+		mf := File{
+			Index:      i,
+			Path:       rel,
+			Size:       info.Size(),
+			SourcePath: p.Abs,
+			ChunkCount: ChunkCountFor(info.Size(), chunkSize),
+		}
+		if err := mf.hashSource(mf.SourcePath, chunkSize); err != nil {
+			return fmt.Errorf("hash %s: %w", p.Abs, err)
+		}
+		m.Files = append(m.Files, mf)
+	}
+	if len(m.Files) == 0 {
+		return errors.New("nothing to send: no files given")
+	}
+	return nil
+}
+
 // BuildFromPaths walks the picked files/folders and fills the manifest.
 // Files are streamed later (ChunkRead), never held whole in RAM.
 //
