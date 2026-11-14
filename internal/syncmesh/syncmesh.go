@@ -1,7 +1,15 @@
 // Package syncmesh implements PC↔PC sync of the shared folder
 // ("chunk-drop-files" inside Downloads): engines announce their files
 // (xxhash, cached in "hashes/"), pull missing/newer ones from the
-// swarm, newest-mtime wins, deletes propagate.
+// swarm, newest-mtime wins.
+//
+// Deletions are explicit signals, not inferred from absence: deleting
+// a file locally records a tombstone (name + mtime of the deleted
+// version) in hashes/cache.json, which is gossiped in every
+// announcement. Peers delete their matching copy (same name, same or
+// older mtime) and re-announce the record, so devices that were
+// offline still learn about the deletion when they return. A newer
+// mtime under the same name is a new file and always wins.
 //
 // Wire: plain HTTP against the existing chunk API (PROTOCOL.md §4)
 // plus two sync endpoints (GET /api/sync/state, POST /api/sync/start),
@@ -46,20 +54,15 @@ const CacheDirName = "hashes"
 // never planned from remote announcements.
 const PartSuffix = ".part"
 
-// TombstoneTTL bounds how long a locally-deleted file stays
-// tombstoned (hashes/cache.json "vanished" entries). Must comfortably
-// exceed any peer's offline time, or its stale copy would resurrect
-// the file when it returns.
-const TombstoneTTL = 30 * 24 * time.Hour
+// TombstoneTTL bounds how long a deletion record stays in
+// hashes/cache.json and is re-announced to peers. The deleted list
+// must outlive offline devices so they still receive the signal when
+// they return (the user asked for at least an hour; a day comfortably
+// covers an overnight laptop and is plenty for a LAN mesh).
+const TombstoneTTL = 24 * time.Hour
 
 // ScanInterval is how often the local folder is rescanned.
 const ScanInterval = 5 * time.Second
-
-// DeleteGrace is how long a *previously announced* local file must be
-// absent from every reachable peer's announcement before delete
-// propagation fires. A peer rescanning/restarting mid-announce must not
-// cost us data (the "file deleted itself during transfer" bug).
-const DeleteGrace = 2 * time.Minute
 
 // LocalFile is one file in the local sync folder.
 type LocalFile struct {
@@ -77,11 +80,31 @@ type FileMeta struct {
 	Xxh   uint64    `json:"xxh"`
 }
 
+// Deleted is one deletion record (tombstone): the identity of the
+// deleted version — file name + its mtime — and when this engine first
+// learned of the deletion (the local TTL anchor). Identity is
+// name+mtime, so a NEWER file under the same name is a different thing
+// and must survive.
+type Deleted struct {
+	Mtime time.Time `json:"mtime"`
+	At    time.Time `json:"at"`
+}
+
+// Covers reports whether this deletion record refers to mtime: the
+// deleted version itself or anything older. A newer mtime is a new
+// file, not the deleted one.
+func (d Deleted) Covers(mtime time.Time) bool { return !mtime.After(d.Mtime) }
+
 // Announcement is one engine's folder state (GET /api/sync/state).
+// Deleted carries this engine's deletion records (rel → mtime of the
+// deleted version), gossiped so every peer — including one that was
+// offline when the delete happened — receives the signal and removes
+// its matching copy.
 type Announcement struct {
-	Engine string               `json:"engine"`
-	Name   string               `json:"name"`
-	Files  map[string]*FileMeta `json:"files"`
+	Engine  string               `json:"engine"`
+	Name    string               `json:"name"`
+	Files   map[string]*FileMeta `json:"files"`
+	Deleted map[string]time.Time `json:"deleted,omitempty"`
 }
 
 // Local is this engine's sync folder state.
@@ -238,9 +261,16 @@ func (l *Local) Files() map[string]*LocalFile {
 	return out
 }
 
-// State returns the wire announcement for this engine.
+// State returns the wire announcement for this engine: files it holds
+// plus every deletion record it knows (the gossip that makes deletes
+// reach devices that were offline).
 func (l *Local) State() *Announcement {
-	a := &Announcement{Engine: l.EngineID, Name: l.Name, Files: map[string]*FileMeta{}}
+	a := &Announcement{
+		Engine:  l.EngineID,
+		Name:    l.Name,
+		Files:   map[string]*FileMeta{},
+		Deleted: l.DeletedState(),
+	}
 	for rel, f := range l.Files() {
 		a.Files[rel] = &FileMeta{Size: f.Size, Mtime: f.Mtime, Xxh: f.Xxh}
 	}
@@ -325,28 +355,89 @@ func (l *Local) RecordPulled(rel string, abs string, size int64, mtime time.Time
 		l.cache = NewHashCache(l.Dir)
 	}
 	l.cache.Put(rel, &CacheEntry{Size: size, Mtime: mtime, Xxh: xxh})
-	l.cache.ClearVanished(rel) // it's back: tombstone off
+	l.cache.ClearDeleted(rel) // a file (re)appeared: old deletion superseded
 	l.mu.Unlock()
 	// Persist immediately: Scan reloads the cache from disk, so an
 	// unsaved entry would be forgotten before its disappearance could
-	// be tombstoned.
+	// be recorded as a deletion.
 	_ = l.cache.Save()
 }
 
-// VanishedTime reports when rel was last noticed missing from the sync
-// folder though previously known (the user deleted it locally). This
-// tombstone keeps the puller from re-downloading the file while the
-// deletion still propagates to peers. See HashCache.Vanished.
-func (l *Local) VanishedTime(rel string) (time.Time, bool) {
+// DeleteInfo returns the deletion record for rel.
+func (l *Local) DeleteInfo(rel string) (Deleted, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.cache == nil {
-		return time.Time{}, false
+		return Deleted{}, false
 	}
 	l.cache.Mu.Lock()
 	defer l.cache.Mu.Unlock()
-	t, ok := l.cache.Vanished[rel]
-	return t, ok
+	d, ok := l.cache.Deleted[rel]
+	if !ok {
+		return Deleted{}, false
+	}
+	return *d, true
+}
+
+// RecordDeleted stores a deletion record (identity: rel + mtime of the
+// deleted version). A newer deleted version replaces an older record.
+func (l *Local) RecordDeleted(rel string, mtime time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.cache == nil {
+		l.cache = NewHashCache(l.Dir)
+	}
+	l.cache.Mu.Lock()
+	if d, ok := l.cache.Deleted[rel]; ok && !mtime.After(d.Mtime) {
+		l.cache.Mu.Unlock()
+		return // same or older deleted version: already known
+	}
+	l.cache.Deleted[rel] = &Deleted{Mtime: mtime, At: time.Now()}
+	l.cache.dirty = true
+	l.cache.Mu.Unlock()
+	// Persist now: the signal must survive this engine going offline.
+	_ = l.cache.Save()
+}
+
+// DropDeleted clears a deletion record (a newer version of the file
+// exists — for example re-created/edited on another peer).
+func (l *Local) DropDeleted(rel string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.cache == nil {
+		return
+	}
+	l.cache.Mu.Lock()
+	if _, ok := l.cache.Deleted[rel]; !ok {
+		l.cache.Mu.Unlock()
+		return
+	}
+	delete(l.cache.Deleted, rel)
+	l.cache.dirty = true
+	l.cache.Mu.Unlock()
+	_ = l.cache.Save()
+}
+
+// DeletedState returns the wire view of all live deletion records
+// (rel → mtime of the deleted version).
+func (l *Local) DeletedState() map[string]time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.cache == nil {
+		return nil
+	}
+	l.cache.Mu.Lock()
+	defer l.cache.Mu.Unlock()
+	if len(l.cache.Deleted) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Time, len(l.cache.Deleted))
+	for rel, d := range l.cache.Deleted {
+		if syncableRel(rel) {
+			out[rel] = d.Mtime
+		}
+	}
+	return out
 }
 
 // DeleteLocal removes a local file (delete propagation) and drops its
@@ -388,30 +479,32 @@ type HashCache struct {
 
 	Mu   sync.Mutex
 	Data map[string]*CacheEntry
-	// Vanished are delete tombstones: rel → when we first noticed the
-	// file gone from the sync folder though previously known. A user
-	// deletion must propagate to every peer; without tombstones, a
-	// peer still inside its own delete grace keeps announcing the file
-	// and the deleter instantly re-pulls it — the "removed here,
-	// re-downloaded seconds later" livelock. Persisted in cache.json
-	// so a restart doesn't forget deletions either.
-	Vanished map[string]time.Time
+	// Deleted are deletion records (see Deleted): rel → deleted
+	// version identity + when first learned. Persisted in cache.json
+	// and announced to peers, so a user's delete reaches every engine
+	// — including ones that were offline — instead of relying on
+	// absence inference (which could never distinguish "deleted
+	// everywhere" from "peer is restarting/rescanning").
+	Deleted map[string]*Deleted
+	// dirty suppresses writes: cache.json is rewritten only when its
+	// content actually changed, not on every 5-second scan.
+	dirty bool
 }
 
 // cacheFile is the persisted shape of the hash cache. The pre-tombstone
 // format was a bare map[string]*CacheEntry; LoadHashCache still reads
 // that for existing installs (missing entries just re-hash once).
 type cacheFile struct {
-	Entries  map[string]*CacheEntry `json:"entries"`
-	Vanished map[string]time.Time   `json:"vanished"`
+	Entries map[string]*CacheEntry `json:"entries"`
+	Deleted map[string]*Deleted    `json:"deleted,omitempty"`
 }
 
 // NewHashCache builds an empty cache bound to a sync dir.
 func NewHashCache(dir string) *HashCache {
 	return &HashCache{
-		Dir:      filepath.Join(dir, CacheDirName),
-		Data:     map[string]*CacheEntry{},
-		Vanished: map[string]time.Time{},
+		Dir:     filepath.Join(dir, CacheDirName),
+		Data:    map[string]*CacheEntry{},
+		Deleted: map[string]*Deleted{},
 	}
 }
 
@@ -431,7 +524,7 @@ func LoadHashCache(dir string) (*HashCache, error) {
 	if err := json.Unmarshal(b, &cf); err != nil {
 		return hc, nil // corrupt: start fresh, files re-hash once
 	}
-	if cf.Entries == nil && cf.Vanished == nil {
+	if cf.Entries == nil && cf.Deleted == nil {
 		// Old (pre-tombstone) format: a bare map[string]*CacheEntry.
 		var data map[string]*CacheEntry
 		if json.Unmarshal(b, &data) == nil && data != nil {
@@ -442,10 +535,10 @@ func LoadHashCache(dir string) (*HashCache, error) {
 	if cf.Entries == nil {
 		cf.Entries = map[string]*CacheEntry{}
 	}
-	if cf.Vanished == nil {
-		cf.Vanished = map[string]time.Time{}
+	if cf.Deleted == nil {
+		cf.Deleted = map[string]*Deleted{}
 	}
-	hc.Data, hc.Vanished = cf.Entries, cf.Vanished
+	hc.Data, hc.Deleted = cf.Entries, cf.Deleted
 	return hc, nil
 }
 
@@ -461,6 +554,7 @@ func (hc *HashCache) Get(rel string) (*CacheEntry, bool) {
 func (hc *HashCache) Put(rel string, e *CacheEntry) {
 	hc.Mu.Lock()
 	hc.Data[rel] = e
+	hc.dirty = true
 	hc.Mu.Unlock()
 }
 
@@ -468,50 +562,73 @@ func (hc *HashCache) Put(rel string, e *CacheEntry) {
 func (hc *HashCache) Drop(rel string) {
 	hc.Mu.Lock()
 	delete(hc.Data, rel)
+	hc.dirty = true
 	hc.Mu.Unlock()
 }
 
-// ClearVanished removes a tombstone (the file is back).
-func (hc *HashCache) ClearVanished(rel string) {
+// ClearDeleted drops a deletion record (a newer version of the file
+// exists; the old deletion no longer applies).
+func (hc *HashCache) ClearDeleted(rel string) {
 	hc.Mu.Lock()
-	delete(hc.Vanished, rel)
+	if _, ok := hc.Deleted[rel]; ok {
+		delete(hc.Deleted, rel)
+		hc.dirty = true
+	}
 	hc.Mu.Unlock()
 }
 
-// Prune drops entries for files that no longer exist (turning them
-// into tombstones), clears tombstones for files that came back, drops
-// expired tombstones, then Save()s.
+// Prune drops hash entries for files that no longer exist, turning
+// them into deletion records (user deletions — identity keeps the
+// last-known mtime), drops records superseded by a NEWER local file,
+// and expires records past TombstoneTTL. It only rewrites cache.json
+// when something actually changed.
 func (hc *HashCache) Prune(files map[string]*LocalFile) {
 	hc.Mu.Lock()
 	now := time.Now()
-	for rel := range hc.Data {
+	for rel, e := range hc.Data {
 		if _, ok := files[rel]; ok {
 			continue
 		}
 		delete(hc.Data, rel)
-		if _, ok := hc.Vanished[rel]; !ok {
-			hc.Vanished[rel] = now // keep the FIRST vanish time
+		hc.dirty = true
+		if d, ok := hc.Deleted[rel]; ok && d.Mtime.Equal(e.Mtime) {
+			continue // same deleted version already recorded: keep its age
 		}
+		hc.Deleted[rel] = &Deleted{Mtime: e.Mtime, At: now}
 	}
-	for rel, t := range hc.Vanished {
-		if _, ok := files[rel]; ok {
-			delete(hc.Vanished, rel) // re-added locally: tombstone off
+	for rel, d := range hc.Deleted {
+		if lf, ok := files[rel]; ok {
+			if lf.Mtime.After(d.Mtime) {
+				delete(hc.Deleted, rel) // newer version: the delete was superseded
+				hc.dirty = true
+			}
 			continue
 		}
-		if now.Sub(t) > TombstoneTTL {
-			delete(hc.Vanished, rel) // stale beyond any realistic peer absence
+		if now.Sub(d.At) > TombstoneTTL {
+			delete(hc.Deleted, rel) // expired after a day
+			hc.dirty = true
 		}
 	}
 	hc.Mu.Unlock()
 	_ = hc.Save()
 }
 
-// Save atomically rewrites the index file.
+// Save atomically rewrites the index file — but only when the cache
+// changed since the last write, so the 5-second scan loop no longer
+// rewrites cache.json when nothing happened.
 func (hc *HashCache) Save() error {
 	hc.Mu.Lock()
-	b, err := json.MarshalIndent(cacheFile{Entries: hc.Data, Vanished: hc.Vanished}, "", " ")
+	if !hc.dirty {
+		hc.Mu.Unlock()
+		return nil
+	}
+	b, err := json.MarshalIndent(cacheFile{Entries: hc.Data, Deleted: hc.Deleted}, "", " ")
+	hc.dirty = false
 	hc.Mu.Unlock()
 	if err != nil {
+		hc.Mu.Lock()
+		hc.dirty = true
+		hc.Mu.Unlock()
 		return err
 	}
 	if err := os.MkdirAll(hc.Dir, 0o755); err != nil {
@@ -519,6 +636,9 @@ func (hc *HashCache) Save() error {
 	}
 	tmp := hc.indexFile() + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		hc.Mu.Lock()
+		hc.dirty = true
+		hc.Mu.Unlock()
 		return err
 	}
 	return os.Rename(tmp, hc.indexFile())
@@ -585,69 +705,6 @@ func ComputeNeeded(local map[string]*LocalFile, anns []*Announcement) map[string
 			Peers: c.who,
 		}
 	}
-	return out
-}
-
-// deleteEpochs tracks, per rel, when we *last saw a peer announce* a
-// local file (or, for never-announced files, when we first scanned
-// it). Delete propagation fires only for files absent from every
-// announcement for a full DeleteGrace. This guards against the
-// classic races that silently ate files ("remote thinks it's
-// deleted → local deletes it while the pull of that very file is
-// still in flight"): a peer restarting/rescanning announces an empty
-// or partial folder for a few seconds, and without epochs every other
-// box would delete everything older than the grace instantly.
-type deleteEpochs struct {
-	mu       sync.Mutex
-	lastSeen map[string]time.Time // rel → last time any peer announced it (or first local scan)
-}
-
-func newDeleteEpochs() *deleteEpochs {
-	return &deleteEpochs{lastSeen: map[string]time.Time{}}
-}
-
-// sync seeds/advances lastSeen from this pass's announcements and
-// returns the deletion candidates. Call AFTER a successful full
-// announcement round.
-func (d *deleteEpochs) sync(local map[string]*LocalFile, anns []*Announcement) []string {
-	now := time.Now()
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	// 1. Every locally-present file must exist in the map (seed on
-	//    first sight so brand-new files get the full grace too).
-	for rel := range local {
-		if _, ok := d.lastSeen[rel]; !ok {
-			d.lastSeen[rel] = now
-		}
-	}
-	// 2. Advance lastSeen for everything any peer announces.
-	for _, a := range anns {
-		for rel := range a.Files {
-			if t, ok := d.lastSeen[rel]; !ok || now.After(t) {
-				d.lastSeen[rel] = now
-			}
-		}
-	}
-	// 3. Deletion candidates: local files whose lastSeen is stale
-	//    AND that are absent from every current announcement.
-	announced := map[string]bool{}
-	for _, a := range anns {
-		for rel := range a.Files {
-			announced[rel] = true
-		}
-	}
-	cut := now.Add(-DeleteGrace)
-	var out []string
-	for rel, last := range d.lastSeen {
-		if _, alive := local[rel]; !alive {
-			delete(d.lastSeen, rel) // file's gone locally anyway: forget it
-			continue
-		}
-		if !announced[rel] && last.Before(cut) {
-			out = append(out, rel)
-		}
-	}
-	sort.Strings(out)
 	return out
 }
 
@@ -869,17 +926,22 @@ func (p *Puller) chunk(peer PeerRef, key string, f, c int) ([]byte, string, erro
 	return b, resp.Header.Get("X-Chunk-Hash"), nil
 }
 
-// filterTombstoned drops planned pulls for locally-deleted files (see
-// HashCache.Vanished): a peer still inside its own delete grace keeps
-// announcing the file, and without this the deleter instantly
-// re-downloads it — the deletion never propagates. A remote mtime
-// NEWER than the vanish time beats the tombstone: the file was
-// genuinely re-created or edited elsewhere after our deletion.
+// filterTombstoned applies deletion records to a pull plan. Identity
+// is name+mtime: a rel announced at the deleted version (or older) is
+// never pulled — the deletion is propagating and pulling it back would
+// undo it. A NEWER mtime is a new file: it syncs normally and its
+// stale deletion record is dropped.
 func filterTombstoned(l *Local, plan map[string]*Needed) {
 	for rel, n := range plan {
-		if t, ok := l.VanishedTime(rel); ok && !n.Mtime.After(t) {
-			delete(plan, rel)
+		d, ok := l.DeleteInfo(rel)
+		if !ok {
+			continue
 		}
+		if n.Mtime.After(d.Mtime) {
+			l.DropDeleted(rel) // newer version: deletion superseded
+			continue
+		}
+		delete(plan, rel)
 	}
 }
 
@@ -929,9 +991,63 @@ type Runner struct {
 	Logf     func(string, ...any)
 	// Act receives concise activity events (nil = disabled).
 	Act *activity.Log
+}
 
-	// deleting tracks per-file delete-epoch state (race guard).
-	deleting *deleteEpochs
+// applyPeerDeletes merges peers' deletion records and removes local
+// files at the deleted version or older. A newer local file wins: it
+// is a different (new) file, so the stale record is dropped instead.
+// Everything merged here is re-announced by State(), which is how the
+// signal reaches engines that were offline when the delete happened.
+func (r *Runner) applyPeerDeletes(anns []*Announcement) {
+	files := r.Local.Files()
+	for _, a := range anns {
+		for rel, mtime := range a.Deleted {
+			if !syncableRel(rel) {
+				continue
+			}
+			lf, have := files[rel]
+			if have && lf.Mtime.After(mtime) {
+				r.Local.DropDeleted(rel) // we hold a newer version
+				continue
+			}
+			r.Local.RecordDeleted(rel, mtime)
+			if !have {
+				continue
+			}
+			r.Local.DeleteLocal(rel)
+			r.logf("sync: deleted %s (deleted on peer %s)", rel, a.Name)
+			r.Act.Add(activity.KindDown, fmt.Sprintf("deleted %s (deleted on %s)", rel, a.Name))
+		}
+	}
+}
+
+// enforceLocalDeletes removes local files covered by our own deletion
+// records — e.g. an old copy restored into the folder after it was
+// deleted. A newer version keeps its (already dropped) record and
+// survives; this is the name+mtime rule applied locally.
+func (r *Runner) enforceLocalDeletes() {
+	files := r.Local.Files()
+	for rel, lf := range files {
+		d, ok := r.Local.DeleteInfo(rel)
+		if !ok || !d.Covers(lf.Mtime) {
+			continue
+		}
+		r.Local.DeleteLocal(rel)
+		r.logf("sync: deleted %s (matches a recorded deletion)", rel)
+		r.Act.Add(activity.KindDown, fmt.Sprintf("deleted %s (recorded deletion)", rel))
+	}
+}
+
+// clearTempDir removes crash leftovers from hashes/tmp but keeps the
+// directory itself.
+func clearTempDir(dir string) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+	}
 }
 
 // SyncOnce runs one full planning + pull + delete-propagation pass.
@@ -944,7 +1060,7 @@ func (r *Runner) SyncOnce() error {
 	if len(peers) == 0 {
 		return nil // nobody else on the LAN yet
 	}
-	// 1. Announcements from every peer.
+	// 1. Announcements from every peer (files + deletion records).
 	anns := make([]*Announcement, 0, len(peers))
 	for _, pe := range peers {
 		a, err := r.Puller.State(pe)
@@ -958,12 +1074,18 @@ func (r *Runner) SyncOnce() error {
 	if len(anns) == 0 {
 		return nil
 	}
-	// 2. Plan + pull (per file: its swarm — every peer that has it).
-	// Pulls are serial within this loop, so any temp file still in
-	// hashes/tmp is a crash leftover from a previous run — clear it.
-	_ = os.RemoveAll(filepath.Join(r.Local.Dir, CacheDirName, "tmp"))
+	// 2. Deletion signals: explicitly propagated, not inferred from
+	//    absence (absence is indistinguishable from a peer restarting
+	//    or rescanning — inferring deletes from it cost files).
+	r.applyPeerDeletes(anns)
+	r.enforceLocalDeletes()
+
+	// 3. Plan + pull (per file: its swarm — every peer that has it).
+	//    Pulls are serial within this loop, so anything still in
+	//    hashes/tmp is a crash leftover from a previous run.
+	clearTempDir(filepath.Join(r.Local.Dir, CacheDirName, "tmp"))
 	plan := ComputeNeeded(r.Local.Files(), anns)
-	filterTombstoned(r.Local, plan) // user-deleted here: never re-pull
+	filterTombstoned(r.Local, plan) // deleted versions are never re-pulled
 	engineByName := map[string]PeerRef{}
 	for _, pe := range peers {
 		engineByName[pe.EngineID] = pe
@@ -983,17 +1105,6 @@ func (r *Runner) SyncOnce() error {
 			r.logf("sync: pull %s: %v", rel, err)
 			r.Act.Add(activity.KindError, fmt.Sprintf("pull %s failed: %v", rel, err))
 		}
-	}
-	// 3. Delete propagation (files no peer announces for a full grace,
-	//    per-file last-seen epochs — see deleteEpochs for the race
-	//    this closes).
-	if r.deleting == nil {
-		r.deleting = newDeleteEpochs()
-	}
-	for _, rel := range r.deleting.sync(r.Local.Files(), anns) {
-		r.Local.DeleteLocal(rel)
-		r.logf("sync: deleted %s (deleted on a peer)", rel)
-		r.Act.Add(activity.KindDown, fmt.Sprintf("deleted %s (deleted on a peer)", rel))
 	}
 	return nil
 }

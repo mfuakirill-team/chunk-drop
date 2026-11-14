@@ -96,7 +96,7 @@ key is configured). Wrong key → `401` with the same generic body.
 | `POST /api/pick/files` | Open a native multi-file dialog **on the engine**, return chosen paths |
 | `POST /api/pick/folder` | Same, for a recursive folder pick |
 | `GET /api/peers` | LAN discovery view: `{"self":{…},"peers":[{id,name,ip,port}…]}` |
-| `GET /api/sync/state` | This engine's shared-folder announcement (rel → size/mtime/xxh) |
+| `GET /api/sync/state` | This engine's shared-folder announcement: `{"files":{rel:{size,mtime,xxh}},"deleted":{rel:mtime}}` |
 | `POST /api/sync/start` | Body `{"rels":["…"]}` → session serving those files for a peer |
 | `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries]}` |
 
@@ -107,18 +107,25 @@ Sync normative details:
   rels ending in `.part` (or inside `hashes/`) are skipped by scan and
   pull planning — so peers can never pull each other's partial
   downloads back.
-- **Local deletions propagate; they are never undone by stale
-  announcements.** When a known file disappears from the sync folder,
-  the engine records a tombstone (persisted in
-  `hashes/cache.json` → `vanished`, kept 30 days) and refuses to
-  re-pull that rel while any peer still announces it — otherwise the
-  deleter would instantly re-download the file from a peer still inside
-  its own delete grace, and the deletion would never propagate.
-  A remote mtime **newer** than the vanish time beats the tombstone
-  (the file was genuinely edited/re-created elsewhere after our
-  deletion). Re-adding the file locally clears the tombstone. Deletion
-  reaches every reachable peer within `DeleteGrace` (2 min) of
-  consistent absence from announcements.
+- **Deletions are explicit signals, never inferred from absence.**
+  Deleting a file in the sync folder records a tombstone — file name +
+  mtime of the deleted version — in `hashes/cache.json` (`deleted`)
+  and announces it in `GET /api/sync/state` → `deleted:{rel:mtime}`.
+  Absence from an announcement is **not** a delete signal (a peer
+  restarting/rescanning looks identical, and inferring deletes from
+  that is what caused files to vanish and deletions to never
+  propagate).
+- **Identity is name + mtime.** A peer that receives a tombstone
+  deletes its copy when the local mtime is the same or older, then
+  re-announces the record (gossip) — so an engine that was offline
+  during the delete still receives the signal when it returns. A
+  **newer** mtime under the same name is a new file: it is kept, syncs
+  normally, and the stale record is dropped. Tombstones are kept and
+  re-announced for `TombstoneTTL` (24 h) and survive engine restarts;
+  a newer deleted version (same name, newer mtime) replaces the record.
+- `cache.json` is rewritten only when its content changes — the 5 s
+  scan loop keeps the file untouched otherwise. Only the *contents* of
+  `hashes/tmp/` are cleared per round; the directory itself stays.
 
 The PWA surface (manifest, icons) is served from the same static web
 app (`/manifest.webmanifest`, `/icons/*`) — no service worker by

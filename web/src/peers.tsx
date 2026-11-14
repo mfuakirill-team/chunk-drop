@@ -121,8 +121,8 @@ export function PeersPanel() {
       {!peers && <p class="muted">discovering LAN clients…</p>}
       <p class="muted" style="margin-bottom:0">
         auto-sync: ~/Downloads/chunk-drop-files ↔ other engines (same
-        group key), every 5s. Deletions propagate to all engines within
-        ~2 min.
+        group key), every 5s. Deletions are signalled to every engine
+        (replayed for 24h to ones that were offline).
       </p>
     </div>
   );

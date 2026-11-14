@@ -415,18 +415,24 @@ the excluded `hashes/tmp/` folder and are invisible to sync everywhere
 sitting in `chunk-drop-files/` from the old build are plain junk — the
 engine ignores them; delete them by hand whenever you like.
 
-### 5.10 "I deleted it, and it came back" (older build)
+### 5.10 "I deleted it, and it came back"
 
-Deleting a file in the sync folder is supposed to remove it on **every**
-engine. Older builds had a livelock: the deleting engine saw the file
-still announced by a peer (which keeps announcing for up to 2 min while
-its own delete grace runs), instantly re-downloaded it, and re-announcing
-reset the peer's timer — so the deletion *never* propagated. Fixed with
-persisted tombstones: a locally deleted file is never re-pulled until
-the deletion has propagated to all reachable peers (~2 min), survives
-engine restarts, and a genuinely newer remote edit (mtime after the
-deletion) still wins. Engines older than this fix can still undo
-deletions — update all machines.
+Deleting a file in the sync folder removes it on **every** engine.
+This is an explicit signal, not a guess: the engine records the
+deletion (file name + mtime of the deleted version) in
+`hashes/cache.json` and broadcasts it in every announcement. Peers
+delete their copy right away (within one 5 s sync round) and re-announce
+the record, so a device that was **offline** during the deletion still
+receives it when it returns — records are kept and replayed for 24 h
+(`TombstoneTTL`) and survive engine restarts.
+
+Name + mtime decide identity: the same name with the same or an older
+mtime is the deleted version (removed); a **newer** mtime is a new file
+(kept, synced, stale record dropped). Older builds inferred deletions
+from a file merely *not* being announced — which is also what a peer
+restarting looks like — so deletions ping-ponged and never converged.
+Update all engines; a mixed mesh with old builds can still resurrect
+files.
 
 ---
 

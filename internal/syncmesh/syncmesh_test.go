@@ -138,62 +138,51 @@ func TestComputeNeededNewestWins(t *testing.T) {
 	}
 }
 
-func TestDeleteEpochsGrace(t *testing.T) {
-	old := time.Now().Add(-2 * time.Hour)
-	d := newDeleteEpochs()
-	local := map[string]*LocalFile{
-		"gone.txt":  {Rel: "gone.txt", Mtime: old},
-		"fresh.txt": {Rel: "fresh.txt", Mtime: time.Now()},
+// Deletion identity is name+mtime: the same name at the same or an
+// older mtime is the deleted version; a newer mtime is a new file.
+func TestDeletedCovers(t *testing.T) {
+	m := time.Unix(1700000000, 0)
+	d := Deleted{Mtime: m}
+	if !d.Covers(m) {
+		t.Error("same mtime must be covered")
 	}
-	anns := []*Announcement{{Engine: "e", Name: "n", Files: map[string]*FileMeta{
-		"other.txt": {Size: 1, Mtime: old, Xxh: 1},
-	}}}
-	// First round: everything local gets seeded with "now" → no deletions
-	// even though no peer announces them (fresh AND stale files).
-	if got := d.sync(local, anns); len(got) != 0 {
-		t.Fatalf("first round deletions = %v, want none", got)
+	if !d.Covers(m.Add(-time.Minute)) {
+		t.Error("older mtime must be covered")
 	}
-	// Simulate the grace passing without any announcement.
-	{
-		d.mu.Lock()
-		for rel := range d.lastSeen {
-			if _, alive := local[rel]; alive {
-				d.lastSeen[rel] = time.Now().Add(-DeleteGrace).Add(-time.Minute)
-			}
-		}
-		d.mu.Unlock()
+	if d.Covers(m.Add(time.Second)) {
+		t.Error("newer mtime must survive")
 	}
-	// Now the stale-but-present file is a deletion candidate; the fresh
-	// one was seeded recently... actually both are now stale in this
-	// simulation, so both are candidates — the guard is that the FIRST
-	// round never deletes (the actual reported bug).
-	got := d.sync(local, anns)
-	for _, rel := range got {
-		if rel != "gone.txt" && rel != "fresh.txt" {
-			t.Errorf("unexpected deletion %q", rel)
-		}
+}
+
+// Deletion records: same/older deleted version never rewrites the
+// record (keeps its age), a newer deleted version replaces it, the
+// record is announced in State() and survives a restart.
+func TestDeleteRecordGossip(t *testing.T) {
+	l, dir := testLocal(t, map[string]string{"a.txt": "v1"})
+	m := time.Unix(1700000000, 0)
+	l.RecordDeleted("gone.iso", m)
+	if d, ok := l.DeleteInfo("gone.iso"); !ok || !d.Mtime.Equal(m) {
+		t.Fatalf("record = %+v ok=%v", d, ok)
 	}
-	// A peer announcing the file prevents the deletion (fresh lastSeen).
-	anns = append(anns, &Announcement{Engine: "e2", Name: "n2", Files: map[string]*FileMeta{
-		"gone.txt": {Size: 3, Mtime: old, Xxh: 9},
-	}})
-	d.mu.Lock()
-	for rel := range d.lastSeen {
-		if _, alive := local[rel]; alive {
-			if rel == "fresh.txt" {
-				d.lastSeen[rel] = time.Now() // still fresh: not a candidate
-			} else {
-				d.lastSeen[rel] = time.Now().Add(-DeleteGrace).Add(-time.Minute)
-			}
-		}
+	l.RecordDeleted("gone.iso", m.Add(-time.Hour)) // older deletion: ignored
+	if d, _ := l.DeleteInfo("gone.iso"); !d.Mtime.Equal(m) {
+		t.Errorf("older deleted version overwrote record: %v", d.Mtime)
 	}
-	d.mu.Unlock()
-	if got := d.sync(local, anns); len(got) != 0 {
-		t.Errorf("announced file deleted: %v", got)
+	l.RecordDeleted("gone.iso", m.Add(time.Hour)) // newer deleted version
+	if d, _ := l.DeleteInfo("gone.iso"); !d.Mtime.Equal(m.Add(time.Hour)) {
+		t.Errorf("newer deleted version not recorded: %v", d.Mtime)
 	}
-	// Missing-from-local entries are dropped from tracking (no leak).
-	delete(local, "gone.txt")
-	_ = d.sync(local, anns)
+	if got := l.State().Deleted["gone.iso"]; !got.Equal(m.Add(time.Hour)) {
+		t.Errorf("record not gossiped in State(): %v", l.State().Deleted)
+	}
+	l2, _ := NewLocal(dir, "x", "e")
+	if _, ok := l2.DeleteInfo("gone.iso"); !ok {
+		t.Error("record lost on restart")
+	}
+	l.DropDeleted("gone.iso")
+	if _, ok := l.DeleteInfo("gone.iso"); ok {
+		t.Error("record not dropped")
+	}
 }
 
 func TestDeleteLocal(t *testing.T) {
@@ -354,56 +343,96 @@ func assertNoParts(t *testing.T, syncDir string) {
 // user's next deletion started the loop again. Tombstones (persisted
 // vanish records) must block re-pulling until the deletion has
 // propagated, while a genuinely newer remote edit still syncs.
-func TestDeleteTombstones(t *testing.T) {
+// Full deletion lifecycle: a user delete becomes a gossiped record
+// (name+mtime), old announcements can't resurrect it, a newer version
+// wins, and restoring the old version is re-deleted by policy.
+func TestDeleteLifecycle(t *testing.T) {
 	l, dir := testLocal(t, map[string]string{"a.txt": "v1"})
 	oldMtime := l.Files()["a.txt"].Mtime
 
-	// User deletes the file → next scan records the tombstone.
+	// User deletes the file → next scan records the deletion identity.
 	if err := os.Remove(filepath.Join(dir, "a.txt")); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	vt, ok := l.VanishedTime("a.txt")
-	if !ok {
-		t.Fatal("vanish not recorded")
+	d, ok := l.DeleteInfo("a.txt")
+	if !ok || !d.Mtime.Equal(oldMtime) {
+		t.Fatalf("deletion record = %+v ok=%v (want mtime %v)", d, ok, oldMtime)
 	}
-	// Tombstone survives an engine restart (persisted in cache.json).
+	// The record survives an engine restart (persisted in cache.json).
 	l2, _ := NewLocal(dir, "x", "e")
-	if vt2, ok := l2.VanishedTime("a.txt"); !ok || !vt2.Equal(vt) {
-		t.Fatalf("tombstone lost on restart: %v %v", vt2, ok)
+	if d2, ok := l2.DeleteInfo("a.txt"); !ok || !d2.Mtime.Equal(oldMtime) {
+		t.Fatalf("record lost on restart: %+v %v", d2, ok)
 	}
 
-	// A peer still announcing the deleted file must NOT resurrect it.
+	// A peer still announcing the deleted version must NOT resurrect it.
 	ann := &Announcement{Engine: "e2", Name: "n2", Files: map[string]*FileMeta{
 		"a.txt": {Size: 2, Mtime: oldMtime, Xxh: 1},
 	}}
 	plan := ComputeNeeded(l.Files(), []*Announcement{ann})
 	filterTombstoned(l, plan)
 	if len(plan) != 0 {
-		t.Fatalf("tombstoned file planned for re-pull: %v", plan)
+		t.Fatalf("deleted version planned for re-pull: %v", plan)
 	}
 
-	// A remote edit newer than our deletion is a new version: it wins.
+	// A NEWER mtime under the same name is a new file: it syncs, and
+	// the stale deletion record is dropped.
 	live := &Announcement{Engine: "e2", Name: "n2", Files: map[string]*FileMeta{
-		"a.txt": {Size: 9, Mtime: time.Now().Add(time.Hour), Xxh: 7},
+		"a.txt": {Size: 9, Mtime: oldMtime.Add(time.Hour), Xxh: 7},
 	}}
 	plan2 := ComputeNeeded(l.Files(), []*Announcement{live})
 	filterTombstoned(l, plan2)
 	if len(plan2) != 1 {
-		t.Fatal("newer remote edit must survive the tombstone")
+		t.Fatal("newer remote version must sync")
+	}
+	if _, ok := l.DeleteInfo("a.txt"); ok {
+		t.Error("stale deletion record not dropped for the newer version")
 	}
 
-	// User re-adds the file → tombstone clears → syncs normally again.
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v2"), 0o644); err != nil {
+	// Restoring the OLD version locally (same name, old mtime) is
+	// re-deleted by the name+mtime policy.
+	l3, dir3 := testLocal(t, map[string]string{"b.txt": "v1"})
+	bMtime := l3.Files()["b.txt"].Mtime
+	if err := os.Remove(filepath.Join(dir3, "b.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Scan(); err != nil {
+	if err := l3.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := l.VanishedTime("a.txt"); ok {
-		t.Fatal("tombstone not cleared on re-add")
+	bPath := filepath.Join(dir3, "b.txt")
+	if err := os.WriteFile(bPath, []byte("old copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(bPath, bMtime, bMtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := l3.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := l3.DeleteInfo("b.txt"); !ok {
+		t.Fatal("record for same/older re-add must remain")
+	}
+	r := &Runner{Local: l3, Puller: &Puller{GroupKey: "k", Act: activity.NewLog(8)}, Logf: t.Logf}
+	r.enforceLocalDeletes()
+	if _, err := os.Stat(bPath); !os.IsNotExist(err) {
+		t.Error("restored old version was not re-deleted")
+	}
+
+	// A genuinely NEWER local version survives and clears the record.
+	if err := os.WriteFile(bPath, []byte("new copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newM := bMtime.Add(time.Hour)
+	if err := os.Chtimes(bPath, newM, newM); err != nil {
+		t.Fatal(err)
+	}
+	if err := l3.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := l3.DeleteInfo("b.txt"); ok {
+		t.Error("newer local version did not clear the deletion record")
 	}
 }
 
@@ -453,8 +482,8 @@ func TestSyncOnceSuppressesTombstonedPull(t *testing.T) {
 	if err := l.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := l.VanishedTime("big.bin"); !ok {
-		t.Fatal("tombstone not recorded")
+	if _, ok := l.DeleteInfo("big.bin"); !ok {
+		t.Fatal("deletion record not created")
 	}
 
 	r := &Runner{
@@ -466,9 +495,154 @@ func TestSyncOnceSuppressesTombstonedPull(t *testing.T) {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&starts) != 0 {
-		t.Errorf("tombstoned file re-pulled: %d session request(s)", starts)
+		t.Errorf("deleted file re-pulled: %d session request(s)", starts)
 	}
 	if _, err := os.Stat(disk); !os.IsNotExist(err) {
 		t.Error("deleted file resurrected on disk")
+	}
+	// The record is re-announced, so peers (including ones that come
+	// back later) keep learning about the deletion.
+	if _, ok := l.State().Deleted["big.bin"]; !ok {
+		t.Error("deletion record not gossiped in the announcement")
+	}
+}
+
+// A peer's delete signal removes our matching copy (name + same/older
+// mtime), and the record is re-announced onward (gossip) — this is the
+// "device X was offline" path: it gets the signal from any peer that
+// still remembers it.
+func TestSyncOnceAppliesPeerDeleteSignal(t *testing.T) {
+	deletedMtime := time.Now().Add(-time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/sync/state" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(Announcement{
+				Engine:  "fake",
+				Name:    "fake",
+				Files:   map[string]*FileMeta{},
+				Deleted: map[string]time.Time{"old.iso": deletedMtime},
+			})
+			return
+		}
+		http.Error(w, "not found", 404)
+	}))
+	t.Cleanup(srv.Close)
+	peer := PeerRef{Host: strings.TrimPrefix(srv.URL, "http://"), EngineID: "fake", Name: "fake"}
+
+	l, dir := testLocal(t, nil)
+	oldPath := filepath.Join(dir, "old.iso")
+	if err := os.WriteFile(oldPath, []byte("deleted version"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(oldPath, deletedMtime, deletedMtime); err != nil {
+		t.Fatal(err)
+	}
+	// A newer file under a different name must be untouched.
+	keepPath := filepath.Join(dir, "keep.bin")
+	if err := os.WriteFile(keepPath, []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Scan(); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Runner{
+		Local:  l,
+		Puller: &Puller{GroupKey: "k", Act: activity.NewLog(16), Logf: t.Logf},
+		Peers:  func() []PeerRef { return []PeerRef{peer} },
+	}
+	if err := r.SyncOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Error("matching file not deleted by the peer's signal")
+	}
+	if _, err := os.Stat(keepPath); err != nil {
+		t.Errorf("unrelated file disturbed: %v", err)
+	}
+	if d, ok := l.DeleteInfo("old.iso"); !ok || !d.Mtime.Equal(deletedMtime) {
+		t.Error("peer's deletion record not stored for re-announcement")
+	}
+	if _, ok := l.State().Deleted["old.iso"]; !ok {
+		t.Error("peer's deletion record not gossiped onward")
+	}
+}
+
+// A NEWER local version beats an incoming delete signal for the same
+// name: the file is kept and the stale record dropped.
+func TestPeerDeleteSignalLosesToNewerLocal(t *testing.T) {
+	older := time.Now().Add(-2 * time.Hour)
+	newer := time.Now()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(Announcement{
+			Engine:  "fake",
+			Name:    "fake",
+			Files:   map[string]*FileMeta{},
+			Deleted: map[string]time.Time{"doc.txt": older},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	peer := PeerRef{Host: strings.TrimPrefix(srv.URL, "http://"), EngineID: "fake", Name: "fake"}
+
+	l, dir := testLocal(t, nil)
+	path := filepath.Join(dir, "doc.txt")
+	if err := os.WriteFile(path, []byte("edited after the delete"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{
+		Local:  l,
+		Puller: &Puller{GroupKey: "k", Act: activity.NewLog(16), Logf: t.Logf},
+		Peers:  func() []PeerRef { return []PeerRef{peer} },
+	}
+	if err := r.SyncOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("newer local version deleted by an old signal: %v", err)
+	}
+	if _, ok := l.State().Deleted["doc.txt"]; ok {
+		t.Error("stale deletion record kept despite newer local file")
+	}
+}
+
+// cache.json must not be rewritten when nothing changed (the scan loop
+// runs every 5 s), but must be written when it did change.
+func TestCacheQuietWhenUnchanged(t *testing.T) {
+	l, dir := testLocal(t, map[string]string{"a.txt": "v1"})
+	path := filepath.Join(dir, CacheDirName, "cache.json")
+	st1, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := l.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st1.ModTime().Equal(st2.ModTime()) {
+		t.Errorf("cache.json rewritten with no changes (%v → %v)", st1.ModTime(), st2.ModTime())
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	st3, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st3.ModTime().Equal(st2.ModTime()) {
+		t.Error("cache.json not written after a real change")
 	}
 }
