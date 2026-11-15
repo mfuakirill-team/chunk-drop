@@ -17,7 +17,9 @@ web:
 	cd web && $(NODE) ci --silent 2>/dev/null || $(NODE) install --silent
 	cd web && $(NODE) run build
 	@# go:embed can't reach web/dist from internal/webdist — sync it.
-	@rm -rf internal/webdist/dist && mkdir -p internal/webdist/dist
+	@# The glob keeps .gitkeep (the fresh-clone placeholder that makes
+	@# `go build`/`go test` work before the first `make web`).
+	@rm -rf internal/webdist/dist/*
 	@cp -a web/dist/. internal/webdist/dist/
 
 ## engine: build the engine binary for the current platform

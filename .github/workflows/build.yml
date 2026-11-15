@@ -25,14 +25,14 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -40,12 +40,14 @@ jobs:
 
       # One make invocation: the `web` prerequisite runs once, then all
       # four cross-compiled engines are built. No plain `bin/engine` —
-      # it would duplicate engine-linux-amd64.
-      - name: Test
-        run: go test ./... -count=1
-
+      # it would duplicate engine-linux-amd64. Tests run AFTER the
+      # build: internal/webdist embeds all:dist, which exists only
+      # once `make web` has run (fresh checkout has no dist dir).
       - name: Build engines (windows-amd64, linux-amd64, linux-arm64, darwin-arm64)
         run: make engine-win engine-linux engine-mac
+
+      - name: Test
+        run: go test ./... -count=1
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

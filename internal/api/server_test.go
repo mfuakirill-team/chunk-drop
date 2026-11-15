@@ -19,6 +19,7 @@ import (
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/transfer"
+	"chunkdrop/internal/webdist"
 	"chunkdrop/internal/webui"
 )
 
@@ -452,6 +453,9 @@ func TestDashboardLocalOnly(t *testing.T) {
 // for every asset. Serve the real embedded app, hit /r/ from a remote
 // address, and fetch every asset the page references.
 func TestReceivePageAssetsLoadRemotely(t *testing.T) {
+	if !webdist.Built() {
+		t.Skip("embedded web bundle not built yet (run make web) — fresh clone")
+	}
 	srv := NewServer(session.NewManager(), webui.Handler())
 	srv.GroupKey = "group-secret-group-secret-group!!"
 	h := srv.Handler()

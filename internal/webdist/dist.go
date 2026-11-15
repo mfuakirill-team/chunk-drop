@@ -22,6 +22,15 @@ import (
 //go:embed all:dist
 var embedded embed.FS
 
+// Built reports whether the embedded bundle is a real build (has an
+// index.html) rather than the fresh-clone .gitkeep placeholder — a
+// fresh clone must compile (go build/test) before the first `make web`,
+// and tests that exercise the built UI skip until it exists.
+func Built() bool {
+	_, err := embedded.ReadFile("dist/index.html")
+	return err == nil
+}
+
 // FS returns the embedded build output of the web app, rooted at the
 // dist/ contents (index.html at the FS root). `all:dist` keeps the
 // directory name as a prefix, so unwrap it.

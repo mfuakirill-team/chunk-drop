@@ -11,6 +11,9 @@ import (
 // with a real built index.html (not the fresh-clone placeholder and not
 // something sniffed from disk at init time).
 func TestEmbeddedIndex(t *testing.T) {
+	if !Built() {
+		t.Skip("embedded web bundle not built yet (run make web) — fresh clone")
+	}
 	f, err := FS.Open("index.html")
 	if err != nil {
 		t.Fatalf("open index.html: %v — was the binary built without `make web`?", err)
