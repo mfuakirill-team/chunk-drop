@@ -52,11 +52,16 @@ function namesLabel(names: string[]): string {
 
 // Map engine errors to phone-actionable text: a 401 on an upload means
 // the link ended (closed, expired, engine restarted) — no file picking
-// retry can fix that, only a fresh QR from the dashboard.
+// retry can fix that, only a fresh QR from the dashboard. A 410 means
+// the batch on this link already finished: one link is one batch, so
+// again the only fix is the dashboard's renewed QR.
 function friendlyError(e: unknown): string {
   const st = (e as Error & { status?: number }).status;
   if (st === 401) {
     return "This upload link has ended (expired or closed). Rescan the QR code on the computer's dashboard to get a fresh one.";
+  }
+  if (st === 410) {
+    return "This link's transfer is complete. To send more, scan the fresh QR on the dashboard (it renews automatically).";
   }
   return String(e);
 }
@@ -141,7 +146,12 @@ export function UploadPage({ uploadKey }: Props) {
     try {
       ({ id } = await postUploadStart(uploadKey, specs));
     } catch (e) {
-      setErr(`The computer rejected the transfer: ${friendlyError(e)}`);
+      const st = (e as Error & { status?: number }).status;
+      // 401/410 already read as full sentences — don't bury them under
+      // a "rejected" prefix.
+      setErr(
+        st === 401 || st === 410 ? friendlyError(e) : `The computer rejected the transfer: ${friendlyError(e)}`,
+      );
       setPhase("error");
       return;
     }
@@ -258,18 +268,9 @@ export function UploadPage({ uploadKey }: Props) {
           <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
             {namesLabel(fileNames)}
           </p>
-          <p>
-            <button
-              class="secondary"
-              onClick={() => {
-                setPhase("idle");
-                setFileCount(0);
-                setFileNames([]);
-                setCurFile("");
-              }}
-            >
-              Send more
-            </button>
+          <p class="muted" style="margin:4px 0">
+            To send more, scan the fresh QR on the dashboard — it renews
+            automatically after each transfer.
           </p>
         </div>
       )}

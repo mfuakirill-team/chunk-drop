@@ -88,12 +88,24 @@ PCs through the existing sync mesh.
       failure logged; `httpError` now surfaces the engine's JSON error
       body on the phone/dashboard instead of a blind "HTTP 400".
 - [x] "Send more" after a finished batch → 401 "session not found":
-      the engine now accepts a new `start` on a finished link (same
-      reset/wipe/verify semantics; previously landed files untouched),
       the phone shows a friendly "link ended — rescan the QR" message
       on true 401s, and the dashboard card **auto-renews its QR** when
       its slot disappears from `/api/activity` (finished / closed /
-      expired / engine restarted).
+      expired / engine restarted). *(Revised after device testing —
+      see below: restart-on-finished was reverted in favour of one
+      link = one batch.)*
+- [x] "Close link" then "send more" still worked on the device: the
+      card auto-renewed its QR after the phone's batch finished, the
+      user's Close killed the *renewed* slot, but the phone's *old
+      finished slot* lingered in RAM (24 h TTL) and the
+      restart-on-finished feature let it accept another batch. Fixed
+      at the root: **one link is one batch** — `Manager.Start` refuses
+      finished slots (`ErrAlreadyFinished` → `410 Gone` "upload
+      already finished"), the phone's done screen explains the
+      renewed-QR flow (no more "Send more" button), a stray chunk on a
+      finished slot fails cleanly (`ErrBadChunk`, not a 500), and
+      mid-transfer restart (airplane recovery) still works. Verified
+      live: start→finish→start = 410; close→start/chunk = 401.
 - [x] Photos landed with "created now": finish stamps the phone's
       mtime (verified) and additionally the **creation time on
       Windows** (`internal/upload/stamps_windows.go`); Linux/macOS

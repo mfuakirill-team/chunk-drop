@@ -180,10 +180,11 @@ func TestStoreChunkAndFinish(t *testing.T) {
 	}
 }
 
-// "Send more" after a finished batch: the same link accepts a new
-// start (fresh manifest), the new batch lands on finish, and the
-// finished slot stays out of List (not in flight anymore).
-func TestSendMoreAfterFinish(t *testing.T) {
+// One link is one batch: after a batch finishes, the same link refuses
+// another start (ErrAlreadyFinished → 410 upstream) and stray chunks
+// fail cleanly. The finished slot stays out of List (the dashboard's
+// card renews on its absence) and batch 1's file is untouched.
+func TestStartAfterFinishRefused(t *testing.T) {
 	dest := t.TempDir()
 	mgr := NewManager()
 	up, err := mgr.NewPending(dest)
@@ -198,7 +199,7 @@ func TestSendMoreAfterFinish(t *testing.T) {
 		}
 	}
 
-	// Batch 1.
+	// Batch 1 lands.
 	b1 := []byte("first batch")
 	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b1.txt", b1)}, 1<<30); err != nil {
 		t.Fatal(err)
@@ -213,31 +214,37 @@ func TestSendMoreAfterFinish(t *testing.T) {
 		t.Errorf("finished slot still listed as live: %d", n)
 	}
 
-	// Batch 2 on the same link ("send more").
+	// The phone's "send more" on the same link must be refused.
 	b2 := []byte("second batch!")
-	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b2.txt", b2)}, 1<<30); err != nil {
-		t.Fatalf("send-more start rejected: %v", err)
+	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b2.txt", b2)}, 1<<30); err != ErrAlreadyFinished {
+		t.Fatalf("start after finish: got %v, want ErrAlreadyFinished", err)
 	}
-	if n := len(mgr.List()); n != 1 {
-		t.Errorf("restarted slot not listed: %d", n)
+	if n := len(mgr.List()); n != 0 {
+		t.Errorf("refused slot re-listed: %d", n)
 	}
-	if err := up.StoreChunk(0, 0, b2, up.Files[0].Hashes[0]); err != nil {
-		t.Fatalf("batch-2 chunk: %v", err)
+
+	// A stray chunk racing with/after finish fails cleanly (staging is
+	// cleaned at finish — this must be a client error, not a 500).
+	if err := up.StoreChunk(0, 0, b2, up.Files[0].Hashes[0]); err != ErrBadChunk {
+		t.Errorf("stray chunk after finish: got %v, want ErrBadChunk", err)
 	}
-	landed, err := up.Finish()
-	if err != nil {
-		t.Fatalf("batch-2 finish: %v", err)
+
+	// Batch 1's landing is untouched.
+	got, err := os.ReadFile(filepath.Join(dest, "b1.txt"))
+	if err != nil || string(got) != string(b1) {
+		t.Errorf("b1.txt = %q, %v", got, err)
 	}
-	if len(landed) != 1 || landed[0].Rel != "b2.txt" {
-		t.Fatalf("batch-2 landed = %+v", landed)
+	if _, err := os.Stat(filepath.Join(dest, "b2.txt")); !os.IsNotExist(err) {
+		t.Errorf("refused batch leaked b2.txt: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(dest, "b2.txt"))
-	if err != nil || string(got) != string(b2) {
-		t.Errorf("b2.txt = %q, %v", got, err)
+
+	// The finished slot still authenticates by key (duplicate finish →
+	// idempotent 200), but start stays refused after the duplicate.
+	if _, err := up.Finish(); err != nil {
+		t.Errorf("duplicate finish after refusal: %v", err)
 	}
-	got1, err := os.ReadFile(filepath.Join(dest, "b1.txt"))
-	if err != nil || string(got1) != string(b1) {
-		t.Errorf("b1.txt clobbered by batch 2: %q, %v", got1, err)
+	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b2.txt", b2)}, 1<<30); err != ErrAlreadyFinished {
+		t.Errorf("start after duplicate finish: got %v, want ErrAlreadyFinished", err)
 	}
 }
 

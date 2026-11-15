@@ -54,6 +54,11 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
       `401` (or a clean error), a *new* slot rejects the old key, and
       the dashboard card stays closed (mint button — it must NOT
       re-mint a QR on its own after you pressed Close).
+- [ ] **One link = one batch**: after a transfer finishes, "Send more"
+      on the *same* link fails with a clean "transfer is complete —
+      scan the fresh QR" message (`410`), the dashboard's QR has
+      already renewed on its own, and the new QR accepts the next
+      batch.
 - [ ] **Names while pushing**: the phone shows which file is being
       sent (and the chosen names while hashing), and the dashboard's
       ▼ line lists the incoming name(s) — verify a wrong pick is

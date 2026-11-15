@@ -219,13 +219,17 @@ func (m *Manager) NewPending(dest string) (*Upload, error) {
 // validating every spec. Keyed by the upload key (the phone's proof),
 // not the id — ids are only ever used in URL paths after authentication.
 //
-// A started slot may be started again — mid-transfer (the phone lost
-// its connection and re-picked files) or after a finished batch (the
-// phone's "send more"): the slot resets and everything re-uploads from
-// scratch. Staging lives only under the excluded hashes/uploads tree
-// and is re-verified by finish, so a restart can never land stale or
-// half-verified bytes. One link is therefore reusable for several
-// batches until it expires or the dashboard closes it.
+// A started-but-not-finished slot may be started again (the phone lost
+// its connection mid-transfer and re-picked files): the slot resets and
+// everything re-uploads from scratch. Staging lives only under the
+// excluded hashes/uploads tree and is re-verified by finish, so a
+// restart can never land stale or half-verified bytes.
+//
+// A *finished* slot refuses further starts (ErrAlreadyFinished, 410):
+// one link is one batch — the dashboard's card renews its QR after
+// each finish, and the next batch needs a scan of that fresh link.
+// This keeps "Close link" authoritative: nothing the phone still holds
+// can push another batch once the transfer is done or the link closed.
 func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (*Upload, error) {
 	files, err := validateSpecs(specs, maxTotal)
 	if err != nil {
@@ -239,8 +243,9 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	wasFinished := u.Finished
-	u.Finished = false // "send more" on a finished link starts a new batch
+	if u.Finished {
+		return nil, ErrAlreadyFinished
+	}
 	wasStarted := u.Started
 	u.Started = true
 	u.Files = files
@@ -266,11 +271,7 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 		fh.Close()
 	}
 	if wasStarted {
-		if wasFinished {
-			logx.Warn("upload", "slot %s: new batch on a finished link (phone tapped \"send more\")", u.ID)
-		} else {
-			logx.Warn("upload", "slot %s restarted by the phone: state reset, staging wiped", u.ID)
-		}
+		logx.Warn("upload", "slot %s restarted by the phone: state reset, staging wiped", u.ID)
 	}
 	return u, nil
 }
@@ -278,8 +279,8 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 // byKeyLocked finds the live-or-finished upload whose encoded key
 // matches, constant-time compare per candidate (mirrors
 // session.Manager.ByKey). Finished slots are found too: a duplicate
-// finish must authenticate (idempotent 200s), and "send more" must be
-// able to start a new batch on the same link.
+// finish (or retry that missed the first 200) must authenticate for up
+// to 20 s and get a consistent response instead of a generic 401.
 func (m *Manager) byKeyLocked(presentedKey string) (*Upload, bool) {
 	for _, u := range m.uploads {
 		if time.Now().After(u.ExpiresAt) {
@@ -434,10 +435,19 @@ func (u *Upload) MatchesID(id string) bool {
 // StoreChunk verifies and writes one chunk of file index i (handler
 // entry point; the per-file variant below does the actual work).
 func (u *Upload) StoreChunk(i, c int, chunk []byte, declaredHash string) error {
-	if i < 0 || i >= len(u.Files) {
+	u.mu.Lock()
+	finished, files := u.Finished, u.Files
+	u.mu.Unlock()
+	if finished {
+		// Staging was cleaned at finish — a stray chunk (lost race with
+		// finish, or a retry after "send more" was refused) must fail
+		// as a clean client error, not a 500.
 		return ErrBadChunk
 	}
-	return u.storeChunk(u.Files[i], c, chunk, declaredHash)
+	if i < 0 || i >= len(files) {
+		return ErrBadChunk
+	}
+	return u.storeChunk(files[i], c, chunk, declaredHash)
 }
 
 // ExpectedChunkSize returns the declared byte length of chunk c of
@@ -556,4 +566,9 @@ func (u *Upload) Cleanup() {
 var (
 	ErrBadChunk     = errors.New("bad chunk")
 	ErrHashMismatch = errors.New("chunk hash mismatch")
+	// ErrAlreadyFinished: start was called on a slot whose batch has
+	// already finished — one link is one batch; the dashboard's card
+	// renews the QR and the next batch needs a scan of that fresh link
+	// (mapped to 410 Gone by the API).
+	ErrAlreadyFinished = errors.New("upload already finished")
 )

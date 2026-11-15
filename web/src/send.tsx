@@ -424,8 +424,9 @@ export function PhoneUploadCard() {
           </p>
           <p class="muted" style="margin-bottom:0">
             Anyone with this link can upload until you close it (or 24 h) —
-            files land on this PC only. The phone can send several batches
-            on one link ("Send more" after a transfer finishes).
+            files land on this PC only. One link is one batch: after each
+            transfer the QR here renews automatically, and the phone must
+            scan the fresh one to send more.
           </p>
         </div>
       )}
