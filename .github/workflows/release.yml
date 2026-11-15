@@ -23,7 +23,7 @@ jobs:
       - name: Install base packages
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git make ca-certificates
 
       - uses: actions/checkout@v5
 
