@@ -50,15 +50,15 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
       (`~/Downloads/chunk-drop-files`), Activity feed logs them.
 - [x] **Propagation**: a second engine with the same group key picks
       the photos up within ~5 s (sync mesh).
-- [ ] **Close link** right after → the phone's next chunk/finish/start
+- [x] **Close link** right after → the phone's next chunk/finish/start
       gets `401` (or a clean error), a *new* slot rejects the old key,
       and the dashboard card stays closed (mint button — it must NOT
       re-mint a QR on its own after you pressed Close).
-- [ ] **One link, several batches**: after a transfer finishes, "Send
+- [x] **One link, several batches**: after a transfer finishes, "Send
       more" on the *same* link starts a fresh batch (the dashboard's
       QR is unchanged — no re-scan needed), and the Activity line
       shows `✓ phone sent N file(s) … batch done, link still open`.
-- [ ] **Names while pushing**: the phone shows which file is being
+- [x] **Names while pushing**: the phone shows which file is being
       sent (and the chosen names while hashing), and the dashboard's
       ▼ line lists the incoming name(s) — verify a wrong pick is
       noticeable on both screens.
