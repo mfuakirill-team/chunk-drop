@@ -1,0 +1,59 @@
+# Release: a new v* tag (created in the GitHub UI, with or without a
+# release) triggers a build of all distribution binaries + SHA256SUMS
+# and attaches them to the release named after the tag. If the release
+# already exists (created in the UI with a description), the assets are
+# added to it and the description is left untouched; if only the tag
+# exists, the release is created with the tag's name.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install base packages
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # One make invocation: the `web` prerequisite runs once, then all
+      # four cross-compiled engines are built. No plain `bin/engine` —
+      # it would duplicate engine-linux-amd64.
+      - name: Build engines (windows-amd64, linux-amd64, linux-arm64, darwin-arm64)
+        run: make engine-win engine-linux engine-mac
+
+      - name: SHA256 checksums
+        run: cd bin && sha256sum engine-windows-amd64.exe engine-linux-amd64 engine-linux-arm64 engine-darwin-arm64 > SHA256SUMS
+
+      - name: Upload binaries to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/engine-windows-amd64.exe
+            bin/engine-linux-amd64
+            bin/engine-linux-arm64
+            bin/engine-darwin-arm64
+            bin/SHA256SUMS
+          fail_on_unmatched_files: true

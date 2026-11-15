@@ -1,0 +1,59 @@
+# CI: build all distribution binaries on every push, and on demand
+# (the "Run workflow" button in the Actions tab — for reruns when the
+# automatic build didn't work). Artifacts are attached to the workflow
+# run; releases are handled by release.yml (tag pushes don't trigger
+# this workflow — branch and tag filters are disjoint).
+name: Build
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install base packages
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # One make invocation: the `web` prerequisite runs once, then all
+      # four cross-compiled engines are built. No plain `bin/engine` —
+      # it would duplicate engine-linux-amd64.
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Build engines (windows-amd64, linux-amd64, linux-arm64, darwin-arm64)
+        run: make engine-win engine-linux engine-mac
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: engines-${{ github.sha }}
+          path: |
+            bin/engine-windows-amd64.exe
+            bin/engine-linux-amd64
+            bin/engine-linux-arm64
+            bin/engine-darwin-arm64
+          if-no-files-found: error

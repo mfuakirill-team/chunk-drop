@@ -79,8 +79,12 @@ Definition of done (from `PLAN.md`):
 - [ ] Wrong/absent session key → 401, no listing, no path hints
 
 ### 10. Distribution (zero cost)
-- [ ] GitHub Releases with the two binaries (or a `dl/` route on the VPS
-      behind the group key once M2 exists)
+- [x] GitHub Releases are automated (`.github/workflows/release.yml`):
+      create a `v*` tag (or a release with a tag) in the GitHub UI →
+      the Release workflow builds the four engines + `SHA256SUMS` on
+      Debian Trixie and attaches them to the release. `.github/
+      workflows/build.yml` builds artifacts on every push (Actions →
+      Build → "Run workflow" for a manual rerun); tag pushes skip it.
 - [ ] One-page "install & first send" note for the group (this doc's §M0 DoD
       as the acceptance script)
 
