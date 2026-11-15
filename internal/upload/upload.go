@@ -219,11 +219,13 @@ func (m *Manager) NewPending(dest string) (*Upload, error) {
 // validating every spec. Keyed by the upload key (the phone's proof),
 // not the id — ids are only ever used in URL paths after authentication.
 //
-// A started-but-not-finished slot may be started again (the phone lost
-// its connection mid-transfer and re-picked files): the slot resets and
-// everything re-uploads from scratch. Staging lives only under the
-// excluded hashes/uploads tree and is re-verified by finish, so a
-// restart can never land stale or half-verified bytes.
+// A started slot may be started again — mid-transfer (the phone lost
+// its connection and re-picked files) or after a finished batch (the
+// phone's "send more"): the slot resets and everything re-uploads from
+// scratch. Staging lives only under the excluded hashes/uploads tree
+// and is re-verified by finish, so a restart can never land stale or
+// half-verified bytes. One link is therefore reusable for several
+// batches until it expires or the dashboard closes it.
 func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (*Upload, error) {
 	files, err := validateSpecs(specs, maxTotal)
 	if err != nil {
@@ -237,9 +239,8 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.Finished {
-		return nil, errors.New("upload already finished")
-	}
+	wasFinished := u.Finished
+	u.Finished = false // "send more" on a finished link starts a new batch
 	wasStarted := u.Started
 	u.Started = true
 	u.Files = files
@@ -265,22 +266,26 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 		fh.Close()
 	}
 	if wasStarted {
-		logx.Warn("upload", "slot %s restarted by the phone: state reset, staging wiped", u.ID)
+		if wasFinished {
+			logx.Warn("upload", "slot %s: new batch on a finished link (phone tapped \"send more\")", u.ID)
+		} else {
+			logx.Warn("upload", "slot %s restarted by the phone: state reset, staging wiped", u.ID)
+		}
 	}
 	return u, nil
 }
 
-// byKeyLocked finds the live upload whose encoded key matches,
-// constant-time compare per candidate (mirrors session.Manager.ByKey).
+// byKeyLocked finds the live-or-finished upload whose encoded key
+// matches, constant-time compare per candidate (mirrors
+// session.Manager.ByKey). Finished slots are found too: a duplicate
+// finish must authenticate (idempotent 200s), and "send more" must be
+// able to start a new batch on the same link.
 func (m *Manager) byKeyLocked(presentedKey string) (*Upload, bool) {
 	for _, u := range m.uploads {
 		if time.Now().After(u.ExpiresAt) {
 			continue
 		}
 		if subtle.ConstantTimeCompare([]byte(presentedKey), []byte(session.KeyEncoding(u.Key))) == 1 {
-			if u.Finished {
-				return nil, false
-			}
 			return u, true
 		}
 	}
@@ -293,19 +298,7 @@ func (m *Manager) byKeyLocked(presentedKey string) (*Upload, bool) {
 func (m *Manager) ByKey(presentedKey string) (*Upload, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if u, ok := m.byKeyLocked(presentedKey); ok {
-		return u, true
-	}
-	// Finished uploads stay visible (finished state, not live).
-	for _, u := range m.uploads {
-		if !u.Finished || time.Now().After(u.ExpiresAt) {
-			continue
-		}
-		if subtle.ConstantTimeCompare([]byte(presentedKey), []byte(session.KeyEncoding(u.Key))) == 1 {
-			return u, true
-		}
-	}
-	return nil, false
+	return m.byKeyLocked(presentedKey)
 }
 
 // Get returns the live upload for id — or ErrNotFound.
@@ -385,13 +378,16 @@ type Info struct {
 	Since string `json:"since"`
 }
 
-// List summarizes all live uploads for the activity feed.
+// List summarizes all live uploads for the activity feed. Finished
+// slots are not listed — they are no longer in flight (and the
+// dashboard's upload card uses the absence of its slot id here to
+// notice a spent link and re-mint a fresh one).
 func (m *Manager) List() []Info {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := []Info{}
 	for _, u := range m.uploads {
-		if time.Now().After(u.ExpiresAt) {
+		if time.Now().After(u.ExpiresAt) || u.Finished {
 			continue
 		}
 		out = append(out, Info{
@@ -529,6 +525,7 @@ func (u *Upload) Finish() ([]Landed, error) {
 			return nil, fmt.Errorf("finalize %s: %w", f.Path, err)
 		}
 		_ = os.Chtimes(abs, time.Now(), f.Mtime) // phone mtime preserved
+		_ = setBirthTime(abs, f.Mtime)           // Windows: "Date created" too
 		out = append(out, Landed{Rel: f.Path, Abs: abs, Size: f.Size})
 	}
 	u.Finished = true

@@ -87,6 +87,17 @@ PCs through the existing sync mesh.
       `--debug` / `--log-level` flags, every HTTP request + handler
       failure logged; `httpError` now surfaces the engine's JSON error
       body on the phone/dashboard instead of a blind "HTTP 400".
+- [x] "Send more" after a finished batch → 401 "session not found":
+      the engine now accepts a new `start` on a finished link (same
+      reset/wipe/verify semantics; previously landed files untouched),
+      the phone shows a friendly "link ended — rescan the QR" message
+      on true 401s, and the dashboard card **auto-renews its QR** when
+      its slot disappears from `/api/activity` (finished / closed /
+      expired / engine restarted).
+- [x] Photos landed with "created now": finish stamps the phone's
+      mtime (verified) and additionally the **creation time on
+      Windows** (`internal/upload/stamps_windows.go`); Linux/macOS
+      birth time is not settable — documented in §5.12.
 
 ### 4. M0 leftovers (not blocking M1)
 - [ ] Device test matrix (M0-TASKS step 9) — needs real hardware.

@@ -44,6 +44,17 @@ function chunkCountFor(size: number): number {
   return size === 0 ? 0 : Math.ceil(size / UPLOAD_CHUNK_SIZE);
 }
 
+// Map engine errors to phone-actionable text: a 401 on an upload means
+// the link ended (closed, expired, engine restarted) — no file picking
+// retry can fix that, only a fresh QR from the dashboard.
+function friendlyError(e: unknown): string {
+  const st = (e as Error & { status?: number }).status;
+  if (st === 401) {
+    return "This upload link has ended (expired or closed). Rescan the QR code on the computer's dashboard to get a fresh one.";
+  }
+  return String(e);
+}
+
 export function UploadPage({ uploadKey }: Props) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [err, setErr] = useState("");
@@ -120,7 +131,7 @@ export function UploadPage({ uploadKey }: Props) {
     try {
       ({ id } = await postUploadStart(uploadKey, specs));
     } catch (e) {
-      setErr(`The computer rejected the transfer: ${e}`);
+      setErr(`The computer rejected the transfer: ${friendlyError(e)}`);
       setPhase("error");
       return;
     }
@@ -153,7 +164,7 @@ export function UploadPage({ uploadKey }: Props) {
       setPhase("done");
       setNote("");
     } catch (e) {
-      setErr(String(e));
+      setErr(friendlyError(e));
       setPhase("error");
     }
   };

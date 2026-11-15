@@ -73,6 +73,13 @@ async function fetchJson<T>(path: string): Promise<T | null> {
   }
 }
 
+/** Poll /api/activity once (group-key gated, dashboard-only route). */
+export function fetchActivity(): Promise<ActivityResp | null> {
+  return fetchJson<ActivityResp>("/api/activity");
+}
+
+export type { ActivityResp, IncomingUpload };
+
 function fmtTime(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "";

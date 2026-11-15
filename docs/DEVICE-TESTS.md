@@ -31,7 +31,7 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
 
 ## B. Robustness hiccups
 
-- [ ] **Airplane-mode the phone 5 s mid-transfer** → resumes, finishes
+- [x] **Airplane-mode the phone 5 s mid-transfer** → resumes, finishes
       (20 s network-patience window — if it ever gives up, the phone
       shows the real error and re-picking restarts the link cleanly).
 - [ ] **Close the receiver tab mid-transfer, reopen the link** → clean
@@ -39,7 +39,7 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
       design).
 - [ ] **Ctrl+C the sending engine mid-transfer** → receiver surfaces
       the error, no partial junk beside the target.
-- [ ] **Wrong session key**: open a `/r/` link with an edited key →
+- [x] **Wrong session key**: open a `/r/` link with an edited key →
       generic `401` body, no listing, no path hints.
 
 ## C. Receive from a phone (M1 upload)
@@ -52,7 +52,10 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
       the photos up within ~5 s (sync mesh).
 - [ ] **Close link** right after → the phone's next chunk/finish gets
       `401` (or a clean error), and a *new* slot rejects the old key.
-- [ ] **Phone mtime**: photos show their original date, not "now".
+- [ ] **Phone mtime**: photos' **modified** date is their original date
+      (not "now"); on Windows the **created** date is original too
+      (on Linux/macOS the "created"/birth column is always "now" —
+      filesystem limitation, `USAGE.md` §5.12).
 
 ## D. PC↔PC sync folder
 
@@ -67,7 +70,7 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
 
 - [x] `Pick files…`/`Pick folder…` open a native dialog **on the
       engine machine**.
-- [ ] From another device: any dashboard API (`/api/peers`,
+- [x] From another device: any dashboard API (`/api/peers`,
       `/api/upload/new`) returns the generic **404** even with the
       group key (`USAGE.md` §5.0) — remote `/r/` and `/u/` pages still
       work.

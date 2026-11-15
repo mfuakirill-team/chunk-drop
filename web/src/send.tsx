@@ -7,7 +7,13 @@ import { useEffect, useRef, useState } from "preact/hooks";
 // sit in their own frame with a Reset button; Cancel sits next to
 // Start; activity/progress live in the side panel (PeersPanel).
 
-import { KEY_HEADER, postUploadClose, postUploadNew, type SessionInfo } from "./api";
+import {
+  KEY_HEADER,
+  postUploadClose,
+  postUploadNew,
+  type SessionInfo,
+} from "./api";
+import { fetchActivity } from "./peers";
 import { buildReceiveUrl, buildUploadUrl } from "./link";
 import { renderQr } from "./qr";
 import { loadGroupKey, saveGroupKey } from "./storage";
@@ -285,6 +291,7 @@ export function PhoneUploadCard() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [copied, setCopied] = useState(false);
+  const [renewed, setRenewed] = useState(false); // auto re-minted after a spent link
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const url = slot ? buildUploadUrl(location.origin, slot.key) : "";
@@ -295,9 +302,35 @@ export function PhoneUploadCard() {
     if (canvas) void renderQr(canvas, url).catch(() => {});
   }, [slot]);
 
+  // Watch the open link: when the engine no longer lists the slot
+  // (phone finished it, link closed elsewhere, 24 h passed, engine
+  // restarted), re-mint so the QR is always scannable — the phone must
+  // never end up erroring on a dead link (DEVICE-TESTS §C).
+  useEffect(() => {
+    if (!slot) return;
+    let alive = true;
+    const t = setInterval(async () => {
+      const act = await fetchActivity();
+      if (!alive) return;
+      if (!act?.incoming?.some((u) => u.id === slot.id)) {
+        try {
+          setSlot(await postUploadNew(loadGroupKey()));
+          setRenewed(true);
+        } catch {
+          // engine unreachable — retry on the next tick
+        }
+      }
+    }, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [slot]);
+
   const open = async () => {
     setBusy(true);
     setErr("");
+    setRenewed(false);
     try {
       setSlot(await postUploadNew(loadGroupKey()));
     } catch (e) {
@@ -318,6 +351,7 @@ export function PhoneUploadCard() {
     try {
       await postUploadClose(loadGroupKey(), slot.key);
       setSlot(null);
+      setRenewed(false);
     } catch {
       setErr("Closing the link failed — it expires on its own within 24 h.");
     } finally {
@@ -344,6 +378,11 @@ export function PhoneUploadCard() {
         </div>
       ) : (
         <div>
+          {renewed && (
+            <p class="muted" style="margin-bottom:0">
+              The previous link ended — a fresh QR is shown below.
+            </p>
+          )}
           <canvas class="qr" ref={canvasRef} width={320} height={320} />
           <p>
             <button
@@ -365,7 +404,8 @@ export function PhoneUploadCard() {
           </p>
           <p class="muted" style="margin-bottom:0">
             Anyone with this link can upload until you close it (or 24 h) —
-            files land on this PC only.
+            files land on this PC only. The phone can send several batches
+            on one link ("Send more" after a transfer finishes).
           </p>
         </div>
       )}

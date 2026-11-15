@@ -180,6 +180,67 @@ func TestStoreChunkAndFinish(t *testing.T) {
 	}
 }
 
+// "Send more" after a finished batch: the same link accepts a new
+// start (fresh manifest), the new batch lands on finish, and the
+// finished slot stays out of List (not in flight anymore).
+func TestSendMoreAfterFinish(t *testing.T) {
+	dest := t.TempDir()
+	mgr := NewManager()
+	up, err := mgr.NewPending(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkSpec := func(name string, payload []byte) FileSpec {
+		sum := sha256.Sum256(payload)
+		return FileSpec{
+			Path: name, Size: int64(len(payload)), ChunkCount: 1,
+			Hashes: []string{hex.EncodeToString(sum[:])}, MtimeMs: 1700000000000,
+		}
+	}
+
+	// Batch 1.
+	b1 := []byte("first batch")
+	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b1.txt", b1)}, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if err := up.StoreChunk(0, 0, b1, up.Files[0].Hashes[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := up.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(mgr.List()); n != 0 {
+		t.Errorf("finished slot still listed as live: %d", n)
+	}
+
+	// Batch 2 on the same link ("send more").
+	b2 := []byte("second batch!")
+	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b2.txt", b2)}, 1<<30); err != nil {
+		t.Fatalf("send-more start rejected: %v", err)
+	}
+	if n := len(mgr.List()); n != 1 {
+		t.Errorf("restarted slot not listed: %d", n)
+	}
+	if err := up.StoreChunk(0, 0, b2, up.Files[0].Hashes[0]); err != nil {
+		t.Fatalf("batch-2 chunk: %v", err)
+	}
+	landed, err := up.Finish()
+	if err != nil {
+		t.Fatalf("batch-2 finish: %v", err)
+	}
+	if len(landed) != 1 || landed[0].Rel != "b2.txt" {
+		t.Fatalf("batch-2 landed = %+v", landed)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "b2.txt"))
+	if err != nil || string(got) != string(b2) {
+		t.Errorf("b2.txt = %q, %v", got, err)
+	}
+	got1, err := os.ReadFile(filepath.Join(dest, "b1.txt"))
+	if err != nil || string(got1) != string(b1) {
+		t.Errorf("b1.txt clobbered by batch 2: %q, %v", got1, err)
+	}
+}
+
 // Staging must be invisible to the sync scan (it lives inside hashes/)
 // — a half-uploaded file must never be announced to peers.
 func TestStagingInvisibleToWalk(t *testing.T) {
