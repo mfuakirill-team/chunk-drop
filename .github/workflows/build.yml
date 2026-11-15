@@ -1,10 +1,10 @@
 # CI: build all distribution binaries on every push, and on demand
 # (the "Run workflow" button in the Actions tab — for reruns when the
-# automatic build didn't work). Branch/tag filters are disjoint from
-# release.yml, so tag pushes don't double-build. Raw, unzipped binaries
-# land on the rolling "dev-build" prerelease for main/manual runs —
-# GitHub's artifact system always zips, so the Release page is the only
-# as-is download path.
+# automatic build didn't work). No workflow artifacts: GitHub's
+# artifact format is a zip and we serve binaries as-is — main/manual
+# runs publish straight to the rolling "dev-build" prerelease, tagged
+# v* pushes go through release.yml (branch/tag filters are disjoint).
+# Branch runs only build+test (no binaries are kept for them).
 name: Build
 
 on:
@@ -13,8 +13,16 @@ on:
       - "**"
   workflow_dispatch:
 
+# The job publishes to the dev-build release on main/manual runs.
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  # Same-ref runs supersede each other (a new main push cancels the
+  # still-running older one); different refs run independently. Main
+  # is the only publishing ref, so the dev-build replace never races.
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -25,7 +33,7 @@ jobs:
       - name: Install base packages
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git make ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git make gh ca-certificates
 
       - uses: actions/checkout@v5
 
@@ -51,68 +59,16 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
-      # One artifact per binary (the zip is GitHub's artifact format —
-      # unavoidable). These feed the publish job below; on branch runs
-      # they are also the only way to grab that branch's binaries.
-      - name: Upload engine-windows-amd64.exe
-        uses: actions/upload-artifact@v4
-        with:
-          name: engine-windows-amd64.exe
-          path: bin/engine-windows-amd64.exe
-          if-no-files-found: error
-
-      - name: Upload engine-linux-amd64
-        uses: actions/upload-artifact@v4
-        with:
-          name: engine-linux-amd64
-          path: bin/engine-linux-amd64
-          if-no-files-found: error
-
-      - name: Upload engine-linux-arm64
-        uses: actions/upload-artifact@v4
-        with:
-          name: engine-linux-arm64
-          path: bin/engine-linux-arm64
-          if-no-files-found: error
-
-      - name: Upload engine-darwin-arm64
-        uses: actions/upload-artifact@v4
-        with:
-          name: engine-darwin-arm64
-          path: bin/engine-darwin-arm64
-          if-no-files-found: error
-
-  # Raw binaries, as-is (no zip — GitHub only serves raw files as
-  # Release assets): every main/manual build replaces the rolling
-  # "dev-build" prerelease. Serialized so two pushes can't race the
-  # delete+recreate. Tagged v* releases (release.yml) stay the stable
-  # path; a prerelease never steals the "Latest" badge from them.
-  publish-dev-build:
-    needs: build
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
-    container:
-      image: debian:trixie
-    permissions:
-      contents: write
-    concurrency:
-      group: dev-build
-      cancel-in-progress: false
-    steps:
-      - name: Install gh
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh ca-certificates
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: bin
-          merge-multiple: true
-
       - name: SHA256 checksums
         run: cd bin && sha256sum engine-windows-amd64.exe engine-linux-amd64 engine-linux-arm64 engine-darwin-arm64 > SHA256SUMS
 
-      - name: Replace the dev-build release with raw binaries
+      # Raw binaries, as-is (GitHub only serves unzipped files as
+      # Release assets): every main/manual build replaces the rolling
+      # "dev-build" prerelease. It's a prerelease, so it never steals
+      # the "Latest" badge from tagged v* releases — those stay the
+      # stable path.
+      - name: Publish raw binaries to the dev-build release
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

@@ -83,10 +83,11 @@ Definition of done (from `PLAN.md`):
       create a `v*` tag (or a release with a tag) in the GitHub UI →
       the Release workflow builds the four engines + `SHA256SUMS` on
       Debian Trixie and attaches them to the release. `.github/
-      workflows/build.yml` builds artifacts on every push (Actions →
+      workflows/build.yml` builds + tests on every push (Actions →
       Build → "Run workflow" for a manual rerun) and publishes raw,
       unzipped binaries to a rolling `dev-build` prerelease on main /
-      manual runs; tag pushes skip it.
+      manual runs; no workflow artifacts (GitHub's artifact format is
+      a zip); tag pushes skip it.
 - [ ] One-page "install & first send" note for the group (this doc's §M0 DoD
       as the acceptance script)
 
