@@ -5,8 +5,12 @@ GO ?= go
 NODE ?= npm
 
 # Static binaries, no cgo, stripped (SmartScreen note in docs/PLAN.md §5).
+# -buildvcs=false: `go build` stamps VCS info by invoking git, which
+# fails (exit 128, dubious ownership) when the repo is mounted into a
+# container owned by another uid — CI does exactly that. Nothing reads
+# the VCS stamp (the version string is set in code), so it's off.
 LDFLAGS := -s -w
-BUILDFLAGS := -trimpath -ldflags="$(LDFLAGS)"
+BUILDFLAGS := -trimpath -buildvcs=false -ldflags="$(LDFLAGS)"
 
 .PHONY: all web engine engine-win engine-linux engine-mac test clean help
 
