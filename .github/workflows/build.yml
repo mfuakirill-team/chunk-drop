@@ -1,8 +1,10 @@
 # CI: build all distribution binaries on every push, and on demand
 # (the "Run workflow" button in the Actions tab — for reruns when the
-# automatic build didn't work). Artifacts are attached to the workflow
-# run; releases are handled by release.yml (tag pushes don't trigger
-# this workflow — branch and tag filters are disjoint).
+# automatic build didn't work). Branch/tag filters are disjoint from
+# release.yml, so tag pushes don't double-build. Raw, unzipped binaries
+# land on the rolling "dev-build" prerelease for main/manual runs —
+# GitHub's artifact system always zips, so the Release page is the only
+# as-is download path.
 name: Build
 
 on:
@@ -49,11 +51,9 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
-      # One artifact per binary: download-artifact always comes as a
-      # zip, so separate artifacts let you fetch just the engine for
-      # your OS instead of one zip holding all four. Raw, unzipped
-      # files live on Releases (release.yml) — this is the test-drive
-      # path for a branch build.
+      # One artifact per binary (the zip is GitHub's artifact format —
+      # unavoidable). These feed the publish job below; on branch runs
+      # they are also the only way to grab that branch's binaries.
       - name: Upload engine-windows-amd64.exe
         uses: actions/upload-artifact@v4
         with:
@@ -81,3 +81,45 @@ jobs:
           name: engine-darwin-arm64
           path: bin/engine-darwin-arm64
           if-no-files-found: error
+
+  # Raw binaries, as-is (no zip — GitHub only serves raw files as
+  # Release assets): every main/manual build replaces the rolling
+  # "dev-build" prerelease. Serialized so two pushes can't race the
+  # delete+recreate. Tagged v* releases (release.yml) stay the stable
+  # path; a prerelease never steals the "Latest" badge from them.
+  publish-dev-build:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    permissions:
+      contents: write
+    concurrency:
+      group: dev-build
+      cancel-in-progress: false
+    steps:
+      - name: Install gh
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh ca-certificates
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: bin
+          merge-multiple: true
+
+      - name: SHA256 checksums
+        run: cd bin && sha256sum engine-windows-amd64.exe engine-linux-amd64 engine-linux-arm64 engine-darwin-arm64 > SHA256SUMS
+
+      - name: Replace the dev-build release with raw binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete dev-build --yes --cleanup-tag || true
+          gh release create dev-build \
+            --prerelease \
+            --title "Dev build — latest main" \
+            --notes "Raw engine binaries built from the latest main (${GITHUB_SHA}). Not a stable release — use the tagged v* releases." \
+            bin/engine-windows-amd64.exe bin/engine-linux-amd64 bin/engine-linux-arm64 bin/engine-darwin-arm64 bin/SHA256SUMS

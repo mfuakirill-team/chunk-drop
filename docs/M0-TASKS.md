@@ -84,7 +84,9 @@ Definition of done (from `PLAN.md`):
       the Release workflow builds the four engines + `SHA256SUMS` on
       Debian Trixie and attaches them to the release. `.github/
       workflows/build.yml` builds artifacts on every push (Actions →
-      Build → "Run workflow" for a manual rerun); tag pushes skip it.
+      Build → "Run workflow" for a manual rerun) and publishes raw,
+      unzipped binaries to a rolling `dev-build` prerelease on main /
+      manual runs; tag pushes skip it.
 - [ ] One-page "install & first send" note for the group (this doc's §M0 DoD
       as the acceptance script)
 
