@@ -84,7 +84,7 @@ PCs through the existing sync mesh.
       and the engine **restarts** a started-not-finished slot on a new
       `start` (staging wiped, bytes re-verified by finish).
 - [x] Debug-mode logging: `internal/logx` (debug/info/warn/error),
-      `-debug` / `-log-level` flags, every HTTP request + handler
+      `--debug` / `--log-level` flags, every HTTP request + handler
       failure logged; `httpError` now surfaces the engine's JSON error
       body on the phone/dashboard instead of a blind "HTTP 400".
 

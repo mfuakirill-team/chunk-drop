@@ -179,7 +179,7 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 }
 
 // requestLog logs every request at debug level — method, path, status,
-// duration and source. With -debug this is the "each step" record of
+// duration and source. With --debug this is the "each step" record of
 // what the engine actually served; at info and above it stays silent.
 func requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

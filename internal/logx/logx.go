@@ -1,5 +1,5 @@
 // Package logx is the engine's leveled logger: debug/info/warn/error,
-// gated by -log-level / -debug (docs/USAGE.md §3). Every failure and
+// gated by --log-level / --debug (docs/USAGE.md §3). Every failure and
 // every transfer step lands here — nothing fails silently.
 package logx
 
@@ -32,7 +32,7 @@ func SetLevel(l Level) { current.Store(int32(l)) }
 // Current returns the active level.
 func Current() Level { return Level(current.Load()) }
 
-// ParseLevel maps a -log-level value to a Level (case-insensitive).
+// ParseLevel maps a --log-level value to a Level (case-insensitive).
 func ParseLevel(s string) (Level, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug":
@@ -68,7 +68,7 @@ func emit(l Level, tag, format string, args ...any) {
 	_, _ = fmt.Fprintln(os.Stderr, line)
 }
 
-// Debug logs at debug level (only with -debug / -log-level debug).
+// Debug logs at debug level (only with --debug / --log-level debug).
 func Debug(tag, format string, args ...any) { emit(LevelDebug, tag, format, args...) }
 
 // Info logs an ordinary progress step.

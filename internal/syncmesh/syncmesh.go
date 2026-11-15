@@ -365,7 +365,8 @@ func (l *Local) RecordUpload(rel, abs string) {
 }
 
 // RecordPulled notes a completed pull in local state + cache.
-func (l *Local) RecordPulled(rel string, abs string, size int64, mtime time.Time, xxh uint64) {	l.mu.Lock()
+func (l *Local) RecordPulled(rel string, abs string, size int64, mtime time.Time, xxh uint64) {
+	l.mu.Lock()
 	l.files[rel] = &LocalFile{Rel: rel, Path: abs, Size: size, Mtime: mtime, Xxh: xxh}
 	if l.cache == nil {
 		l.cache = NewHashCache(l.Dir)

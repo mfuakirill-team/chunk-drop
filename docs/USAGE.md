@@ -114,17 +114,17 @@ directory.
 ## 3. Run the engine
 
 ```bash
-./engine                    # port from config (default 8090)
-./engine -port 8091         # one-off port override
-./engine -bind 192.168.1.20  # pin the advertised LAN IP (see §5.4)
-./engine -debug             # verbose logs: every request, chunk, step
-./engine -log-level warn    # quiet: info hidden (debug|info|warn|error)
-./engine help               # all flags
+./engine                     # port from config (default 8090)
+./engine --port 8091         # one-off port override
+./engine --bind 192.168.1.20 # pin the advertised LAN IP (see §5.4)
+./engine --debug             # verbose logs: every request, chunk, step
+./engine --log-level warn    # quiet: info hidden (debug|info|warn|error)
+./engine help                # all flags
 ./engine version
-./engine keygen             # fresh group key (see §2.1)
+./engine keygen              # fresh group key (see §2.1)
 ```
 
-**Log levels** (`-log-level`, or `-debug` as shorthand for `debug`):
+**Log levels** (`--log-level`, or `--debug` as shorthand for `debug`):
 
 | Level    | Shows                                                                    |
 |----------|--------------------------------------------------------------------------|
@@ -134,7 +134,7 @@ directory.
 | `error`  | failures only — panics, staging errors, 5xx responses                    |
 
 Lines look like `engine: [warn] upload: slot <id> restarted by the phone: state reset, staging wiped`.
-**When something misbehaves, run `./engine -debug` and retry** — every step
+**When something misbehaves, run `./engine --debug` and retry** — every step
 and every error reason ends up on stderr.
 
 Startup output:
@@ -442,7 +442,7 @@ create adapters that look like LAN. Symptoms: QR contains an IP the phone
 can't reach (e.g. `10.x` VPN range), while both devices are on Wi-Fi.
 
 ```bash
-./engine -bind 192.168.1.20        # the actual Wi-Fi IP
+./engine --bind 192.168.1.20       # the actual Wi-Fi IP
 # or persistent, in engine.toml:   bind_ip = "192.168.1.20"
 ```
 
@@ -533,7 +533,7 @@ your `PUID`/`PGID`.
 | Phone says the computer rejected the transfer | The engine validates names/paths (`docs/PROTOCOL.md` §8) and size caps — rename the file (no `../`, no Windows-reserved names) or raise `max_upload_bytes`. |
 | "Session key rejected"/401 on the phone after it worked | The link was closed (or the engine restarted — upload state is RAM-only). Open a new link. |
 | "HTTP 400" after re-picking files mid-transfer | Fixed: a started-but-not-finished link now **restarts** cleanly (state reset, staging wiped, re-upload from scratch — staged bytes are re-verified by finish, so nothing stale can land). If you still see it, the link already finished or expired — open a new one. |
-| Phone says "upload incomplete — N of M files abandoned" | The network dropped longer than the 20 s patience window. Stay connected and pick the files again; with `-debug` the engine log shows exactly which chunk failed and why. |
+| Phone says "upload incomplete — N of M files abandoned" | The network dropped longer than the 20 s patience window. Stay connected and pick the files again; with `--debug` the engine log shows exactly which chunk failed and why. |
 | Files didn't arrive but the phone says "Sent" | Check the destination: the **sync folder** by default, or `receive_dir` if set. The dashboard's Activity feed logs every landed file. |
 | Phone picks a folder but files arrive flat | Firefox (some versions) ignores folder picks — it sends files without their folder prefix. Use Chrome/Safari on the phone, or accept the flat batch. |
 | A `hashes/uploads/` folder in the sync folder | That's upload staging — never synced, never announced, auto-cleared. Leave it. |
@@ -567,8 +567,8 @@ engine                  start the sender dashboard server
 engine keygen           print a fresh 32-byte group key
 engine version
 engine help
-engine -port <n>        bind a different port (default 8090 / config)
-engine -bind <ip>       advertise a specific LAN IP in the QR
+engine --port <n>       bind a different port (default 8090 / config)
+engine --bind <ip>      advertise a specific LAN IP in the QR
 ```
 
 Exit codes: 0 clean shutdown (`Ctrl+C`/SIGTERM), 1 fatal startup error

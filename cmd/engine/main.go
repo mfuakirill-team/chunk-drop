@@ -3,9 +3,9 @@
 //
 // Usage:
 //
-//	engine            start the sender dashboard server
-//	engine keygen     print a fresh 32-byte base64url group key
-//	engine -port 8090 override the port
+//	engine                start the sender dashboard server
+//	engine keygen         print a fresh 32-byte base64url group key
+//	engine --port 8090    override the port
 package main
 
 import (
@@ -51,7 +51,7 @@ func main() {
 			fmt.Println(key)
 			return
 		case "version":
-			fmt.Println("chunkdrop engine M0")
+			printVersion()
 			return
 		case "help", "-h", "--help":
 			usage()
@@ -60,14 +60,25 @@ func main() {
 	}
 
 	fs := flag.NewFlagSet("engine", flag.ExitOnError)
+	fs.Usage = usage // --help / -h / a bad flag all print the same help
 	port := fs.Int("port", 0, "port to bind (default from config, 8090)")
 	bind := fs.String("bind", "", "IP to bind + advertise in QR (default: auto)")
 	logLevel := fs.String("log-level", "", "log level: debug|info|warn|error (default info)")
 	debug := fs.Bool("debug", false, "debug mode — verbose logging of every step and error")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
-	// -debug is shorthand for -log-level debug; both filter everything
+	if *showVersion {
+		printVersion()
+		return
+	}
+	// GNU convention: after the options, at most a subcommand may remain.
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "engine: unknown command %q — try 'engine --help'\n", extra[0])
+		os.Exit(2)
+	}
+	// --debug is shorthand for --log-level debug; both filter everything
 	// through internal/logx (docs/USAGE.md §3).
 	if *debug {
 		*logLevel = "debug"
@@ -86,20 +97,34 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`chunkdrop engine
+	fmt.Print(`chunkdrop engine — LAN file transfer
 
 Usage:
-  engine                  start the sender dashboard on the LAN
-  engine keygen          print a fresh group key (paste into engine.toml)
-  engine -port 8090      override the port
-  engine -bind 192.168.1.20
-                          force the advertised IP (VPN adapter workaround)
-  engine -debug          verbose logs: every request, chunk and step
-  engine -log-level warn hide info lines (debug|info|warn|error)
+  engine [options]      start the sender dashboard on the LAN
+  engine keygen         print a fresh group key (paste into engine.toml)
+  engine version        print the build version
+  engine help           show this help
+
+Options:
+  --port N              port to bind (default: from config, 8090)
+  --bind IP             IP to bind and advertise in the QR
+                        (default: auto-detect; pin it if a VPN or virtual
+                        adapter is picked instead of your real Wi-Fi IP)
+  --debug               verbose logs: every request, chunk and step
+  --log-level LEVEL     noise filter: debug|info|warn|error (default: info)
+                        (--debug is shorthand for --log-level debug)
+  --version             print the build version and exit
+  -h, --help            show this help
+
+Single-dash spellings (-port, -bind, …) are accepted too.
 
 Config: ~/.config/chunkdrop/engine.toml (Linux)
         %APPDATA%\chunkdrop\engine.toml (Windows)
 `)
+}
+
+func printVersion() {
+	fmt.Println("chunkdrop engine M1")
 }
 
 // Package main wiring note (#1.3): one shared activity feed drives both
@@ -294,7 +319,7 @@ func run(portFlag int, bindFlag string) error {
 		fmt.Printf("  sync dir:   %s\n", srv.Sync.Dir)
 	}
 	if len(candidates) > 1 {
-		fmt.Printf("  (%d LAN interfaces seen — use -bind to pin one)\n", len(candidates))
+		fmt.Printf("  (%d LAN interfaces seen — use --bind to pin one)\n", len(candidates))
 	}
 	fmt.Println()
 
