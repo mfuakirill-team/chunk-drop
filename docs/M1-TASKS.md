@@ -99,13 +99,14 @@ PCs through the existing sync mesh.
       user's Close killed the *renewed* slot, but the phone's *old
       finished slot* lingered in RAM (24 h TTL) and the
       restart-on-finished feature let it accept another batch. Fixed
-      at the root: **one link is one batch** — `Manager.Start` refuses
-      finished slots (`ErrAlreadyFinished` → `410 Gone` "upload
-      already finished"), the phone's done screen explains the
-      renewed-QR flow (no more "Send more" button), a stray chunk on a
-      finished slot fails cleanly (`ErrBadChunk`, not a 500), and
-      mid-transfer restart (airplane recovery) still works. Verified
-      live: start→finish→start = 410; close→start/chunk = 401.
+      while keeping the user's model (**one link = several batches,
+      Close kills the key for good**): the card no longer re-mints on
+      a finish — finished-but-unexpired slots stay listed flagged
+      `finished: true`, so the *same* QR keeps serving "send more"
+      batches, and there is never a second slot for a closed key to
+      fall back to. Close deletes the one slot → start/chunk/finish
+      all 401 instantly. Verified live: batch1→finish→batch2 (same
+      link) → 200s; close → start/chunk = 401, incoming empty.
 - [x] Photos landed with "created now": finish stamps the phone's
       mtime (verified) and additionally the **creation time on
       Windows** (`internal/upload/stamps_windows.go`); Linux/macOS

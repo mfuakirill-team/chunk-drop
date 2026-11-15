@@ -219,17 +219,15 @@ func (m *Manager) NewPending(dest string) (*Upload, error) {
 // validating every spec. Keyed by the upload key (the phone's proof),
 // not the id — ids are only ever used in URL paths after authentication.
 //
-// A started-but-not-finished slot may be started again (the phone lost
-// its connection mid-transfer and re-picked files): the slot resets and
-// everything re-uploads from scratch. Staging lives only under the
-// excluded hashes/uploads tree and is re-verified by finish, so a
-// restart can never land stale or half-verified bytes.
-//
-// A *finished* slot refuses further starts (ErrAlreadyFinished, 410):
-// one link is one batch — the dashboard's card renews its QR after
-// each finish, and the next batch needs a scan of that fresh link.
-// This keeps "Close link" authoritative: nothing the phone still holds
-// can push another batch once the transfer is done or the link closed.
+// A started slot may be started again — mid-transfer (the phone lost
+// its connection and re-picked files) or after a finished batch (the
+// phone's "send more"): the slot resets and everything re-uploads from
+// scratch. Staging lives only under the excluded hashes/uploads tree
+// and is re-verified by finish, so a restart can never land stale or
+// half-verified bytes. One link is therefore reusable for several
+// batches until it expires or the dashboard closes it — and closing is
+// the only way to kill the key early: the card never mints a second
+// slot for the same QR, so a closed key has no lingering twin.
 func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (*Upload, error) {
 	files, err := validateSpecs(specs, maxTotal)
 	if err != nil {
@@ -243,10 +241,9 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.Finished {
-		return nil, ErrAlreadyFinished
-	}
+	wasFinished := u.Finished
 	wasStarted := u.Started
+	u.Finished = false // "send more" on a finished link starts a new batch
 	u.Started = true
 	u.Files = files
 	u.Staging = filepath.Join(u.Dest, CacheDirName, UploadsTmpDir, u.ID)
@@ -271,7 +268,11 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 		fh.Close()
 	}
 	if wasStarted {
-		logx.Warn("upload", "slot %s restarted by the phone: state reset, staging wiped", u.ID)
+		if wasFinished {
+			logx.Info("upload", "slot %s: new batch on the same link (phone tapped \"send more\")", u.ID)
+		} else {
+			logx.Warn("upload", "slot %s restarted by the phone: state reset, staging wiped", u.ID)
+		}
 	}
 	return u, nil
 }
@@ -279,8 +280,9 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 // byKeyLocked finds the live-or-finished upload whose encoded key
 // matches, constant-time compare per candidate (mirrors
 // session.Manager.ByKey). Finished slots are found too: a duplicate
-// finish (or retry that missed the first 200) must authenticate for up
-// to 20 s and get a consistent response instead of a generic 401.
+// finish (lost first response) still authenticates, and the phone's
+// "send more" starts a new batch on the same key — the QR's key lives
+// until the dashboard closes it or it expires.
 func (m *Manager) byKeyLocked(presentedKey string) (*Upload, bool) {
 	for _, u := range m.uploads {
 		if time.Now().After(u.ExpiresAt) {
@@ -372,12 +374,13 @@ func (m *Manager) CleanStale(dest string) {
 
 // Info is the dashboard-facing summary of one upload session.
 type Info struct {
-	ID    string   `json:"id"`
-	Files int      `json:"files"`
-	Done  int64    `json:"bytesDone"`
-	Total int64    `json:"bytesTotal"`
-	Since string   `json:"since"`
-	Names []string `json:"names,omitempty"` // first NamesCap paths (dashboard display)
+	ID       string   `json:"id"`
+	Files    int      `json:"files"`
+	Done     int64    `json:"bytesDone"`
+	Total    int64    `json:"bytesTotal"`
+	Since    string   `json:"since"`
+	Finished bool     `json:"finished,omitempty"` // batch done; key still live for "send more"
+	Names    []string `json:"names,omitempty"`    // first NamesCap paths (dashboard display)
 }
 
 // NamesCap bounds the names list in Info — a 1000-photo push must not
@@ -385,24 +388,26 @@ type Info struct {
 // the Files count.
 const NamesCap = 8
 
-// List summarizes all live uploads for the activity feed. Finished
-// slots are not listed — they are no longer in flight (and the
-// dashboard's upload card uses the absence of its slot id here to
-// notice a spent link and re-mint a fresh one).
+// List summarizes all uploads whose key is still live for the
+// dashboard's card: in-flight pushes and *finished* ones (flagged) —
+// a finished slot is still the same QR the phone holds, and "send
+// more" reuses it, so the card must NOT re-mint while it exists.
+// Expired slots are dropped (the card re-mints on their absence).
 func (m *Manager) List() []Info {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := []Info{}
 	for _, u := range m.uploads {
-		if time.Now().After(u.ExpiresAt) || u.Finished {
+		if time.Now().After(u.ExpiresAt) {
 			continue
 		}
 		info := Info{
-			ID:    u.ID,
-			Files: len(u.Files),
-			Done:  u.BytesDone(),
-			Total: u.BytesTotal(),
-			Since: u.CreatedAt.UTC().Format(time.RFC3339),
+			ID:       u.ID,
+			Files:    len(u.Files),
+			Done:     u.BytesDone(),
+			Total:    u.BytesTotal(),
+			Since:    u.CreatedAt.UTC().Format(time.RFC3339),
+			Finished: u.Finished,
 		}
 		for i, f := range u.Files {
 			if i >= NamesCap {
@@ -566,9 +571,4 @@ func (u *Upload) Cleanup() {
 var (
 	ErrBadChunk     = errors.New("bad chunk")
 	ErrHashMismatch = errors.New("chunk hash mismatch")
-	// ErrAlreadyFinished: start was called on a slot whose batch has
-	// already finished — one link is one batch; the dashboard's card
-	// renews the QR and the next batch needs a scan of that fresh link
-	// (mapped to 410 Gone by the API).
-	ErrAlreadyFinished = errors.New("upload already finished")
 )

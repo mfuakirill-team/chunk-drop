@@ -181,7 +181,7 @@ every upload).
 |---|---|
 | 🔒 `POST /api/upload/new` | Dashboard mints a slot: `{"id","key"}` (RAM-only, 24 h TTL) |
 | 🔒 `POST /api/upload/close` | Dashboard kills a link: body `{"key":"<upload-key>"}`; wipes its staging; the phone's next chunk/finish/start gets `401` immediately — closed is terminal, the dashboard never re-opens a closed link |
-| `POST /api/upload/start` | Body: `{"files":[{path,size,chunkCount,hashes,mtime}…]}` (browser-built manifest); engine validates §8 paths, chunk math, hash shape, caps → `{"id","files","bytes"}`. A started-but-**not-finished** slot may be started again (phone lost its connection mid-transfer): state resets, staging is wiped, everything re-uploads. A **finished** slot refuses further starts → `410 Gone` `{"error":"upload already finished"}`: one link is one batch; the dashboard's card renews its QR after each finish and the next batch needs a scan of that fresh link |
+| `POST /api/upload/start` | Body: `{"files":[{path,size,chunkCount,hashes,mtime}…]}` (browser-built manifest); engine validates §8 paths, chunk math, hash shape, caps → `{"id","files","bytes"}`. A started slot may be started **again** — mid-transfer (phone lost its connection, re-picked files) or after a finished batch (phone's "send more"): state resets, staging is wiped, everything re-uploads. One link serves several batches until it expires or the dashboard closes it — the QR's key lives until one of those, and the card never mints a second slot for the same QR, so a closed key has no lingering twin |
 | `PUT /api/upload/{uploadId}/chunk/{f}/{c}` | Body: chunk bytes + `X-Chunk-Hash` header; engine verifies against **both** the header and the declared manifest hash before ack; body capped at exactly one chunk |
 | `POST /api/upload/{uploadId}/finish` | Engine checks completeness + sizes, renames each staged file into place (atomic, same filesystem), stamps the phone's mtime, refreshes the sync state; idempotent on retry |
 
@@ -192,10 +192,15 @@ Normative details:
 - A restarted slot is safe: staging lives only under the excluded
   `hashes/uploads/` tree, a restart wipes it, and finish re-verifies
   every staged byte (size + SHA-256 against the current manifest) —
-  stale bytes from the aborted attempt can never land. This restart
-  window covers only a started-not-finished slot; a finished slot
-  refuses starts (`410`), so a lingering finished slot can never
-  accept another batch — one link is one batch.
+  stale bytes from the aborted attempt can never land. This covers
+  both a mid-transfer restart and a fresh batch on a finished link.
+- The activity listing includes finished (but unexpired) slots flagged
+  `finished: true`: the phone still holds that QR and "send more"
+  reuses it, so the dashboard's card must not re-mint while the slot
+  exists. **Closing the link is the only early kill**: it deletes the
+  slot instantly and the same key the phone holds stops working for
+  start/chunk/finish (401) — there is no second slot a closed key
+  could fall back to.
 - Finish stamps each landed file's **modification** time from the
   phone's `mtime`; on Windows the **creation** time is stamped too.
   (Linux/macOS filesystems have no userspace API for birth time.)

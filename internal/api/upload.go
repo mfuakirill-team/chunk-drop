@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,13 +107,6 @@ func (s *Server) handleUploadStart(up *upload.Upload, w http.ResponseWriter, r *
 		return
 	}
 	if _, err := s.Uploads.Start(up.KeyEncoded(), body.Files, s.maxUploadBytes()); err != nil {
-		if errors.Is(err, upload.ErrAlreadyFinished) {
-			// One link is one batch: the batch on this link is done, the
-			// phone must scan the fresh QR the dashboard's card renewed.
-			logx.Warn("upload", "start refused for slot %s: link's batch already finished", up.ID)
-			http.Error(w, `{"error":"upload already finished"}`, http.StatusGone)
-			return
-		}
 		logx.Warn("upload", "start rejected for slot %s: %v", up.ID, err)
 		http.Error(w, quoteErr(err), http.StatusBadRequest)
 		return

@@ -424,9 +424,10 @@ export function PhoneUploadCard() {
           </p>
           <p class="muted" style="margin-bottom:0">
             Anyone with this link can upload until you close it (or 24 h) —
-            files land on this PC only. One link is one batch: after each
-            transfer the QR here renews automatically, and the phone must
-            scan the fresh one to send more.
+            files land on this PC only. The link is reusable: the phone's
+            "Send more" starts a fresh batch on the same QR, and the QR
+            only renews if the link ends on its own (expired or engine
+            restarted) — never after you press Close link.
           </p>
         </div>
       )}

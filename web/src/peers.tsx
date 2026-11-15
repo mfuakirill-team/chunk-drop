@@ -51,6 +51,7 @@ interface IncomingUpload {
   bytesDone: number;
   bytesTotal: number;
   since: string;
+  finished?: boolean; // batch done, key still live for "send more"
   names?: string[]; // first few paths (engine caps at 8)
 }
 
@@ -211,14 +212,16 @@ export function ActivityPanel({ send }: { send: SendState | null }) {
                 : "idle — no transfers in flight"}
             </p>
           )}
-          {/* phone→PC pushes in progress (M1) — names included so the
-              dashboard owner can verify the right files are arriving */}
+          {/* phone→PC pushes (M1) — names included so the dashboard
+              owner can verify the right files are arriving; finished
+              batches show as done (key still live for "send more") */}
           {(act?.incoming ?? []).map((u) => (
             <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
-              ▼ phone pushing {u.files} file(s)
+              {u.finished ? "✓ phone sent" : "▼ phone pushing"} {u.files} file(s)
               {u.names?.length ? ` — ${namesLabel(u.names, u.files)}` : ""} —{" "}
               {humanBytes(u.bytesDone)}
               {u.bytesTotal > 0 ? ` / ${humanBytes(u.bytesTotal)}` : ""}
+              {u.finished ? " — batch done, link still open" : ""}
             </p>
           ))}
           <ul class="act">

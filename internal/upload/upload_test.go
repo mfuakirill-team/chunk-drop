@@ -180,11 +180,12 @@ func TestStoreChunkAndFinish(t *testing.T) {
 	}
 }
 
-// One link is one batch: after a batch finishes, the same link refuses
-// another start (ErrAlreadyFinished → 410 upstream) and stray chunks
-// fail cleanly. The finished slot stays out of List (the dashboard's
-// card renews on its absence) and batch 1's file is untouched.
-func TestStartAfterFinishRefused(t *testing.T) {
+// One link, several batches: a finished slot stays listed (flagged
+// Finished, so the dashboard's card keeps its QR instead of re-minting
+// a second slot — the old key must never outlive a Close), "send more"
+// restarts the same slot, a stray chunk after finish fails cleanly,
+// and Close deletes the slot so the key goes dead for every purpose.
+func TestSendMoreAfterFinish(t *testing.T) {
 	dest := t.TempDir()
 	mgr := NewManager()
 	up, err := mgr.NewPending(dest)
@@ -210,41 +211,60 @@ func TestStartAfterFinishRefused(t *testing.T) {
 	if _, err := up.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(mgr.List()); n != 0 {
-		t.Errorf("finished slot still listed as live: %d", n)
+
+	// The finished slot stays listed, flagged Finished — the card's
+	// watcher keys on presence, so the same QR survives for batch 2
+	// (a re-mint here is what once let a closed key keep working).
+	list := mgr.List()
+	if len(list) != 1 || list[0].ID != up.ID || !list[0].Finished {
+		t.Fatalf("finished slot not listed as finished: %+v", list)
 	}
 
-	// The phone's "send more" on the same link must be refused.
+	// Batch 2 on the same link ("send more").
 	b2 := []byte("second batch!")
-	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b2.txt", b2)}, 1<<30); err != ErrAlreadyFinished {
-		t.Fatalf("start after finish: got %v, want ErrAlreadyFinished", err)
+	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b2.txt", b2)}, 1<<30); err != nil {
+		t.Fatalf("send-more start rejected: %v", err)
 	}
-	if n := len(mgr.List()); n != 0 {
-		t.Errorf("refused slot re-listed: %d", n)
+	list = mgr.List()
+	if len(list) != 1 || list[0].Finished {
+		t.Fatalf("restarted slot not listed as in-flight: %+v", list)
+	}
+	if err := up.StoreChunk(0, 0, b2, up.Files[0].Hashes[0]); err != nil {
+		t.Fatalf("batch-2 chunk: %v", err)
+	}
+	landed, err := up.Finish()
+	if err != nil {
+		t.Fatalf("batch-2 finish: %v", err)
+	}
+	if len(landed) != 1 || landed[0].Rel != "b2.txt" {
+		t.Fatalf("batch-2 landed = %+v", landed)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "b2.txt"))
+	if err != nil || string(got) != string(b2) {
+		t.Errorf("b2.txt = %q, %v", got, err)
+	}
+	got1, err := os.ReadFile(filepath.Join(dest, "b1.txt"))
+	if err != nil || string(got1) != string(b1) {
+		t.Errorf("b1.txt clobbered by batch 2: %q, %v", got1, err)
 	}
 
-	// A stray chunk racing with/after finish fails cleanly (staging is
-	// cleaned at finish — this must be a client error, not a 500).
-	if err := up.StoreChunk(0, 0, b2, up.Files[0].Hashes[0]); err != ErrBadChunk {
+	// Stray chunk between batches (staging cleaned at finish) fails
+	// cleanly — a client error, not a 500.
+	b3 := []byte("third!")
+	if err := up.StoreChunk(0, 0, b3, up.Files[0].Hashes[0]); err != ErrBadChunk {
 		t.Errorf("stray chunk after finish: got %v, want ErrBadChunk", err)
 	}
 
-	// Batch 1's landing is untouched.
-	got, err := os.ReadFile(filepath.Join(dest, "b1.txt"))
-	if err != nil || string(got) != string(b1) {
-		t.Errorf("b1.txt = %q, %v", got, err)
+	// Close link kills the key for everything: no more ByKey (the
+	// phone's chunk/finish/start get 401) and nothing listed.
+	if !mgr.Close(up.KeyEncoded()) {
+		t.Fatal("close after finish returned false")
 	}
-	if _, err := os.Stat(filepath.Join(dest, "b2.txt")); !os.IsNotExist(err) {
-		t.Errorf("refused batch leaked b2.txt: %v", err)
+	if _, ok := mgr.ByKey(up.KeyEncoded()); ok {
+		t.Error("closed finished slot still authenticates by key")
 	}
-
-	// The finished slot still authenticates by key (duplicate finish →
-	// idempotent 200), but start stays refused after the duplicate.
-	if _, err := up.Finish(); err != nil {
-		t.Errorf("duplicate finish after refusal: %v", err)
-	}
-	if _, err := mgr.Start(up.KeyEncoded(), []FileSpec{mkSpec("b2.txt", b2)}, 1<<30); err != ErrAlreadyFinished {
-		t.Errorf("start after duplicate finish: got %v, want ErrAlreadyFinished", err)
+	if n := len(mgr.List()); n != 0 {
+		t.Errorf("closed slot still listed: %d", n)
 	}
 }
 

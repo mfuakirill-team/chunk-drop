@@ -335,10 +335,11 @@ Notes:
   terminal: the phone's next chunk/start gets a 401, and the card
   never re-opens a link you closed (you press the button again for
   the next transfer).
-- One link is one batch: after the phone's batch finishes, the link
-  refuses another start (410). The dashboard card **renews its QR
-  automatically** after each transfer — the phone scans the fresh one
-  to send more.
+- One link, several batches: the phone's **Send more** starts a fresh
+  batch on the same QR (the dashboard keeps showing it — the card only
+  re-mints if the link ends on its own, e.g. expired or engine
+  restarted). **Close link** kills the key instantly for every
+  purpose: no start, chunk, or finish goes through afterwards.
 - Upload sessions are RAM-only: restarting the engine kills a
   half-finished upload (the phone page shows an error; start a new
   link).
@@ -545,8 +546,8 @@ your `PUID`/`PGID`.
 | "Open a phone upload link" is greyed out | Set the group key in the dashboard first (the link is minted by the engine, which needs the key). |
 | Phone says the computer rejected the transfer | The engine validates names/paths (`docs/PROTOCOL.md` §8) and size caps — rename the file (no `../`, no Windows-reserved names) or raise `max_upload_bytes`. |
 | "Session key rejected"/401 on the phone after it worked | The link was closed (or the engine restarted — upload state is RAM-only). Open a new link. |
-| "Send more" after a finished transfer | Refused by design (`410`) — one link is one batch. The dashboard card renews its QR automatically after each transfer; the phone scans the fresh one for the next batch. (A transfer interrupted mid-way can still be restarted on the same link.) |
-| Dashboard QR dead / re-scanning gives errors | The card watches its link: when the phone finishes a batch, the link is closed, or 24 h pass, the card **mints a fresh QR automatically** (with a note above it). No manual refresh needed. |
+| "Send more" after a finished transfer | Works — the same link takes another batch (each batch re-uploads from scratch; staged bytes are re-verified by finish, so nothing stale can land). If the phone reports 401 instead, the link was closed, expired, or the engine restarted — rescan the QR. |
+| Dashboard QR dead / re-scanning gives errors | The card keeps the QR while the link lives — through any number of batches. It **mints a fresh one automatically** only when the link ends on its own (24 h expiry, engine restart) or you closed it (closing is terminal; press the mint button for a new link). |
 | Phone says "upload incomplete — N of M files abandoned" | The network dropped longer than the 20 s patience window. Stay connected and pick the files again; with `--debug` the engine log shows exactly which chunk failed and why. |
 | Photos land with "created today" | The **modified** date is the photo's original date (that's what file managers and photo tools sort/show by default). On Windows the **created** date is stamped correctly too; on Linux/macOS filesystems there is no API to set a file's birth time, so that column stays "now" — a platform limitation, not a transfer bug. |
 | Files didn't arrive but the phone says "Sent" | Check the destination: the **sync folder** by default, or `receive_dir` if set. The dashboard's Activity feed logs every landed file. |
