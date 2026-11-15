@@ -180,7 +180,7 @@ every upload).
 | Method & path | Purpose |
 |---|---|
 | 🔒 `POST /api/upload/new` | Dashboard mints a slot: `{"id","key"}` (RAM-only, 24 h TTL) |
-| 🔒 `POST /api/upload/close` | Dashboard kills a link: body `{"key":"<upload-key>"}`; wipes its staging |
+| 🔒 `POST /api/upload/close` | Dashboard kills a link: body `{"key":"<upload-key>"}`; wipes its staging; the phone's next chunk/finish/start gets `401` immediately — closed is terminal, the dashboard never re-opens a closed link |
 | `POST /api/upload/start` | Body: `{"files":[{path,size,chunkCount,hashes,mtime}…]}` (browser-built manifest); engine validates §8 paths, chunk math, hash shape, caps → `{"id","files","bytes"}`. A started slot may be started **again** — mid-transfer (phone lost its connection, re-picked files) or after a finished batch (phone's "send more"): state resets, staging is wiped, everything re-uploads. One link thus serves several batches until it expires or is closed |
 | `PUT /api/upload/{uploadId}/chunk/{f}/{c}` | Body: chunk bytes + `X-Chunk-Hash` header; engine verifies against **both** the header and the declared manifest hash before ack; body capped at exactly one chunk |
 | `POST /api/upload/{uploadId}/finish` | Engine checks completeness + sizes, renames each staged file into place (atomic, same filesystem), stamps the phone's mtime, refreshes the sync state; idempotent on retry |

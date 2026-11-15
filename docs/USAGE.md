@@ -271,7 +271,6 @@ button): works, but saving needs a desktop browser with the File System
 Access API (Chrome/Edge/Chromium on Windows/Linux).
 
 ### 4.2.1 The Activity frame (sender side)
-
 Below the **LAN clients** card sits its own **Activity** card showing:
 
 - **Activity** — a concise feed of what's happening: ▲ uploading
@@ -280,6 +279,11 @@ Below the **LAN clients** card sits its own **Activity** card showing:
   lines, refreshed every 3 s.
 - **Live receiver progress** of your running transfer (which files the
   phone already has) — moved here from the sender card (M0.2).
+- **File names while in flight**: the ▲ line lists which files the
+  receiver is pulling right now, and each ▼ phone-push line lists the
+  incoming file name(s) (`▼ phone pushing 2 file(s) — a.jpg, b.jpg +
+  1 more — 2.1 GiB / 3.9 GiB`) — so you can verify the right files are
+  moving, not just the byte count.
 
 Both panels are read-only views; nothing here changes transfer state.
 
@@ -315,7 +319,9 @@ The reverse direction: the phone pushes files **into** the PC.
    page. Pick **Choose files** or **Choose a folder**.
 3. The phone builds the manifest (hashes every 4 MiB chunk), streams
    the chunks, and the engine verifies **every** chunk server-side
-   before keeping it. Watch the progress on both screens.
+   before keeping it. The phone shows **which file is being sent**,
+   and the dashboard's ▼ line lists the incoming name(s) — verify on
+   either screen that the right files are moving.
 4. Done — the files land in the **sync folder**
    (`~/Downloads/chunk-drop-files`) and propagate to your other
    engines automatically. (Set `receive_dir` in engine.toml to keep
@@ -325,7 +331,12 @@ Notes:
 
 - The link is dangerous-ish while open: **anyone with it can upload**
   to this PC until you press **Close link** (or it expires, 24 h).
-  Close it as soon as the phone is done.
+  Close it as soon as the phone is done — closing is instant and
+  terminal: the phone's next chunk/start gets a 401, and the card
+  never re-opens a link you closed (you press the button again for
+  the next transfer).
+- The link stays good for several batches: the phone's **Send more**
+  starts a fresh upload on the same link.
 - Upload sessions are RAM-only: restarting the engine kills a
   half-finished upload (the phone page shows an error; start a new
   link).

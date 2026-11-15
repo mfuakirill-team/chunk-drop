@@ -371,12 +371,18 @@ func (m *Manager) CleanStale(dest string) {
 
 // Info is the dashboard-facing summary of one upload session.
 type Info struct {
-	ID    string `json:"id"`
-	Files int    `json:"files"`
-	Done  int64  `json:"bytesDone"`
-	Total int64  `json:"bytesTotal"`
-	Since string `json:"since"`
+	ID    string   `json:"id"`
+	Files int      `json:"files"`
+	Done  int64    `json:"bytesDone"`
+	Total int64    `json:"bytesTotal"`
+	Since string   `json:"since"`
+	Names []string `json:"names,omitempty"` // first NamesCap paths (dashboard display)
 }
+
+// NamesCap bounds the names list in Info — a 1000-photo push must not
+// bloat the polled activity JSON; the dashboard shows "+N more" using
+// the Files count.
+const NamesCap = 8
 
 // List summarizes all live uploads for the activity feed. Finished
 // slots are not listed — they are no longer in flight (and the
@@ -390,13 +396,20 @@ func (m *Manager) List() []Info {
 		if time.Now().After(u.ExpiresAt) || u.Finished {
 			continue
 		}
-		out = append(out, Info{
+		info := Info{
 			ID:    u.ID,
 			Files: len(u.Files),
 			Done:  u.BytesDone(),
 			Total: u.BytesTotal(),
 			Since: u.CreatedAt.UTC().Format(time.RFC3339),
-		})
+		}
+		for i, f := range u.Files {
+			if i >= NamesCap {
+				break
+			}
+			info.Names = append(info.Names, f.Path)
+		}
+		out = append(out, info)
 	}
 	return out
 }

@@ -98,6 +98,19 @@ PCs through the existing sync mesh.
       mtime (verified) and additionally the **creation time on
       Windows** (`internal/upload/stamps_windows.go`); Linux/macOS
       birth time is not settable — documented in §5.12.
+- [x] "Close link" left the key working: engine-side close already
+      killed the slot instantly (verified: chunk/finish/start → 401
+      right after close) — the dashboard card's auto-renew could
+      re-mint a QR around a manual close, making it look unblocked.
+      Manual close is now terminal (no auto re-mint), `closed:false`
+      is surfaced as an error, and the card confirms "the phone's key
+      no longer works". PC→phone cancel already ended sessions
+      instantly (`/api/cancel` → receiver 401).
+- [x] File names while sending: the phone's `/u/` page lists the
+      chosen names and highlights the file currently being sent
+      (`onFileStart`); the dashboard's ▼ phone-push line lists the
+      incoming name(s) (`Info.Names`, engine-capped at 8, "+N more"
+      in the UI) and the ▲ receiving line lists files being pulled.
 
 ### 4. M0 leftovers (not blocking M1)
 - [ ] Device test matrix (M0-TASKS step 9) — needs real hardware.

@@ -44,6 +44,12 @@ function chunkCountFor(size: number): number {
   return size === 0 ? 0 : Math.ceil(size / UPLOAD_CHUNK_SIZE);
 }
 
+// "a.jpg, b.jpg, c.jpg +4 more" — cap at 3 names, count the rest.
+function namesLabel(names: string[]): string {
+  const shown = names.slice(0, 3).join(", ");
+  return names.length > 3 ? `${shown} +${names.length - 3} more` : shown;
+}
+
 // Map engine errors to phone-actionable text: a 401 on an upload means
 // the link ended (closed, expired, engine restarted) — no file picking
 // retry can fix that, only a fresh QR from the dashboard.
@@ -64,6 +70,8 @@ export function UploadPage({ uploadKey }: Props) {
   const [upTotal, setUpTotal] = useState(0);
   const [upBytes, setUpBytes] = useState(0);
   const [fileCount, setFileCount] = useState(0);
+  const [fileNames, setFileNames] = useState<string[]>([]); // chosen, for the display
+  const [curFile, setCurFile] = useState(""); // file being sent right now
   const [note, setNote] = useState("");
   const handleRef = useRef<UploadHandle | null>(null);
 
@@ -85,6 +93,8 @@ export function UploadPage({ uploadKey }: Props) {
     setErr("");
     if (picked.length === 0) return;
     setFileCount(picked.length);
+    setFileNames(picked.map((p) => relPath(p.file)));
+    setCurFile("");
     setPhase("hashing");
     setHashTotal(picked.reduce((n, p) => n + p.file.size, 0));
     setHashDone(0);
@@ -151,6 +161,7 @@ export function UploadPage({ uploadKey }: Props) {
           setUpBytes(bytesDone);
           setUpTotal(total);
         },
+        onFileStart: (path) => setCurFile(path),
         onChunkError: (path, _c, e, attempt) => {
           // The pipeline owns the give-up decision; until `done` rejects
           // this stays a retry note.
@@ -208,6 +219,9 @@ export function UploadPage({ uploadKey }: Props) {
           <p>
             Reading {fileCount} file(s)… {humanBytes(hashDone)} / {humanBytes(hashTotal)}
           </p>
+          <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
+            {namesLabel(fileNames)}
+          </p>
           <progress max={hashTotal} value={hashDone} style="width:100%" />
         </div>
       )}
@@ -216,6 +230,12 @@ export function UploadPage({ uploadKey }: Props) {
           <p>
             Uploading {fileCount} file(s) — {humanBytes(upBytes)} ·{" "}
             {fmtPct(upDone, upTotal)}
+          </p>
+          <p style="margin:4px 0; overflow-wrap:anywhere">
+            {curFile ? <>Sending: <strong>{curFile}</strong></> : "\u00a0"}
+          </p>
+          <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
+            {namesLabel(fileNames)}
           </p>
           <progress max={upTotal} value={upDone} style="width:100%" />
           {note && <p class="muted">{note}</p>}
@@ -235,12 +255,17 @@ export function UploadPage({ uploadKey }: Props) {
       {phase === "done" && (
         <div>
           <p>✓ Sent {fileCount} file(s) — check the computer's dashboard.</p>
+          <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
+            {namesLabel(fileNames)}
+          </p>
           <p>
             <button
               class="secondary"
               onClick={() => {
                 setPhase("idle");
                 setFileCount(0);
+                setFileNames([]);
+                setCurFile("");
               }}
             >
               Send more
@@ -256,6 +281,7 @@ export function UploadPage({ uploadKey }: Props) {
               setPhase("idle");
               setErr("");
               setNote("");
+              setCurFile("");
             }}
           >
             Try again

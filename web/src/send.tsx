@@ -292,6 +292,8 @@ export function PhoneUploadCard() {
   const [err, setErr] = useState("");
   const [copied, setCopied] = useState(false);
   const [renewed, setRenewed] = useState(false); // auto re-minted after a spent link
+  const [closedNote, setClosedNote] = useState(false); // last link closed by hand
+  const manuallyClosedRef = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const url = slot ? buildUploadUrl(location.origin, slot.key) : "";
@@ -302,17 +304,22 @@ export function PhoneUploadCard() {
     if (canvas) void renderQr(canvas, url).catch(() => {});
   }, [slot]);
 
-  // Watch the open link: when the engine no longer lists the slot
-  // (phone finished it, link closed elsewhere, 24 h passed, engine
+  // Watch the open link: when a *successful* activity poll no longer
+  // lists the slot (phone finished the batch, 24 h passed, engine
   // restarted), re-mint so the QR is always scannable — the phone must
-  // never end up erroring on a dead link (DEVICE-TESTS §C).
+  // never end up erroring on a dead link (DEVICE-TESTS §C). A manual
+  // "Close link" is terminal: no re-mint after it (the key must stay
+  // dead until the user explicitly opens a new link).
   useEffect(() => {
     if (!slot) return;
     let alive = true;
     const t = setInterval(async () => {
       const act = await fetchActivity();
-      if (!alive) return;
-      if (!act?.incoming?.some((u) => u.id === slot.id)) {
+      // act === null (engine unreachable, transient) means "unknown" —
+      // never interpret that as "slot gone", and never re-mint after a
+      // manual close.
+      if (!alive || manuallyClosedRef.current || !act) return;
+      if (!act.incoming?.some((u) => u.id === slot.id)) {
         try {
           setSlot(await postUploadNew(loadGroupKey()));
           setRenewed(true);
@@ -331,6 +338,8 @@ export function PhoneUploadCard() {
     setBusy(true);
     setErr("");
     setRenewed(false);
+    setClosedNote(false);
+    manuallyClosedRef.current = false;
     try {
       setSlot(await postUploadNew(loadGroupKey()));
     } catch (e) {
@@ -348,12 +357,17 @@ export function PhoneUploadCard() {
   const close = async () => {
     if (!slot) return;
     setBusy(true);
+    // Mark the close BEFORE the request: no watcher tick may re-mint
+    // around it — a closed link must stay closed.
+    manuallyClosedRef.current = true;
     try {
       await postUploadClose(loadGroupKey(), slot.key);
       setSlot(null);
       setRenewed(false);
-    } catch {
-      setErr("Closing the link failed — it expires on its own within 24 h.");
+      setClosedNote(true); // "the phone's key no longer works"
+    } catch (e) {
+      manuallyClosedRef.current = false;
+      setErr(`Closing the link failed (${e}) — it expires on its own within 24 h.`);
     } finally {
       setBusy(false);
     }
@@ -364,6 +378,12 @@ export function PhoneUploadCard() {
       <h3 style="margin-top:0">Receive from a phone</h3>
       {!slot ? (
         <div>
+          {closedNote && (
+            <p class="muted" style="margin-bottom:8px">
+              Link closed — the phone's key no longer works (its next
+              chunk gets a 401). Open a new link for the next transfer.
+            </p>
+          )}
           <p class="muted" style="margin-bottom:8px">
             Let a phone push photos/files into this PC — they land in the
             sync folder and propagate to your other engines.

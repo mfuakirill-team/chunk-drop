@@ -26,7 +26,7 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
       packing, M1) — check the download is `bundle.zip` with the tree
       inside, while a desktop receiver of the *same session* still
       gets the tree (`USAGE.md` §4.2).
-- [ ] **4 GB single file → desktop receiver**: completes; spot-check
+- [x] **4 GB single file → desktop receiver**: completes; spot-check
       the last chunk (file size exact).
 
 ## B. Robustness hiccups
@@ -51,8 +51,14 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
 - [x] **Propagation**: a second engine with the same group key picks
       the photos up within ~5 s (sync mesh).
 - [ ] **Close link** right after → the phone's next chunk/finish gets
-      `401` (or a clean error), and a *new* slot rejects the old key.
-- [ ] **Phone mtime**: photos' **modified** date is their original date
+      `401` (or a clean error), a *new* slot rejects the old key, and
+      the dashboard card stays closed (mint button — it must NOT
+      re-mint a QR on its own after you pressed Close).
+- [ ] **Names while pushing**: the phone shows which file is being
+      sent (and the chosen names while hashing), and the dashboard's
+      ▼ line lists the incoming name(s) — verify a wrong pick is
+      noticeable on both screens.
+- [x] **Phone mtime**: photos' **modified** date is their original date
       (not "now"); on Windows the **created** date is original too
       (on Linux/macOS the "created"/birth column is always "now" —
       filesystem limitation, `USAGE.md` §5.12).

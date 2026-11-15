@@ -51,6 +51,7 @@ interface IncomingUpload {
   bytesDone: number;
   bytesTotal: number;
   since: string;
+  names?: string[]; // first few paths (engine caps at 8)
 }
 
 const KIND_MARK: Record<string, string> = {
@@ -168,6 +169,24 @@ export function ActivityPanel({ send }: { send: SendState | null }) {
   const latest = events.slice(-12).reverse(); // newest on top, concise
   const liveReceiver = send?.sessionInfo?.receiver;
 
+  // Names of the files a receiver is pulling right now, mapped from
+  // the session's have-bitmap indices into the started manifest — so
+  // the sender can verify WHAT is going where, not just how much.
+  const receivingNames: string[] = [];
+  if (liveReceiver && send?.started) {
+    const files = send.started.manifest.files;
+    for (const idx of Object.keys(liveReceiver.have)) {
+      const f = files[Number(idx)];
+      if (f) receivingNames.push(f.path);
+    }
+  }
+
+  // "a.jpg, b.jpg +5 more" — cap at 3 names, count the rest of the total.
+  const namesLabel = (names: string[], total: number): string => {
+    const shown = names.slice(0, 3).join(", ");
+    return total > 3 ? `${shown} +${total - 3} more` : shown;
+  };
+
   return (
     <div class="card">
       <h3 style="margin-top:0">
@@ -180,9 +199,10 @@ export function ActivityPanel({ send }: { send: SendState | null }) {
         <div>
           {/* live receiver progress of the running transfer */}
           {liveReceiver ? (
-            <p class="muted" style="margin:4px 0">
+            <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
               ▲ receiving now: {liveReceiver.receiver} (
-              {Object.keys(liveReceiver.have).length} file(s) in progress)
+              {Object.keys(liveReceiver.have).length} file(s) in progress
+              {receivingNames.length > 0 ? `: ${namesLabel(receivingNames, receivingNames.length)}` : ""})
             </p>
           ) : (act?.incoming?.length ?? 0) > 0 ? null : (
             <p class="muted" style="margin:4px 0">
@@ -191,10 +211,13 @@ export function ActivityPanel({ send }: { send: SendState | null }) {
                 : "idle — no transfers in flight"}
             </p>
           )}
-          {/* phone→PC pushes in progress (M1) */}
+          {/* phone→PC pushes in progress (M1) — names included so the
+              dashboard owner can verify the right files are arriving */}
           {(act?.incoming ?? []).map((u) => (
-            <p class="muted" style="margin:4px 0">
-              ▼ phone pushing {u.files} file(s) — {humanBytes(u.bytesDone)}
+            <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
+              ▼ phone pushing {u.files} file(s)
+              {u.names?.length ? ` — ${namesLabel(u.names, u.files)}` : ""} —{" "}
+              {humanBytes(u.bytesDone)}
               {u.bytesTotal > 0 ? ` / ${humanBytes(u.bytesTotal)}` : ""}
             </p>
           ))}

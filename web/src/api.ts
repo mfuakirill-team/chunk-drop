@@ -361,6 +361,10 @@ export async function postUploadClose(groupKey: string, key: string): Promise<vo
     body: JSON.stringify({ key }),
   });
   if (!r.ok) throw await httpError(r);
+  // The engine answers 200 even when nothing matched — verify the kill
+  // actually happened, otherwise the phone could keep uploading.
+  const { closed } = (await r.json()) as { closed: boolean };
+  if (!closed) throw new Error("the engine had no such link (already closed or restarted)");
 }
 
 export async function postUploadStart(
@@ -402,6 +406,7 @@ export async function postUploadFinish(key: string, id: string): Promise<void> {
 
 export interface UploadCallbacks {
   onProgress: (done: number, total: number, bytesDone: number, bytesTotal: number) => void;
+  onFileStart?: (path: string) => void; // each file's first chunk attempt
   onChunkError: (path: string, chunk: number, err: Error, attempt: number) => void;
 }
 
@@ -436,6 +441,7 @@ export function uploadPipeline(
     for (let i = 0; i < specs.length && !cancelled; i++) {
       const spec = specs[i];
       if (spec.chunkCount === 0) continue; // empty file: finish creates it
+      cb.onFileStart?.(spec.path);
       let next = 0;
       const worker = async () => {
         while (!cancelled) {
