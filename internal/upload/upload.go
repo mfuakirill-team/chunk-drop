@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"chunkdrop/internal/logx"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/transfer"
 )
@@ -217,6 +218,12 @@ func (m *Manager) NewPending(dest string) (*Upload, error) {
 // Start fills a pending upload with the browser-built manifest,
 // validating every spec. Keyed by the upload key (the phone's proof),
 // not the id — ids are only ever used in URL paths after authentication.
+//
+// A started-but-not-finished slot may be started again (the phone lost
+// its connection mid-transfer and re-picked files): the slot resets and
+// everything re-uploads from scratch. Staging lives only under the
+// excluded hashes/uploads tree and is re-verified by finish, so a
+// restart can never land stale or half-verified bytes.
 func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (*Upload, error) {
 	files, err := validateSpecs(specs, maxTotal)
 	if err != nil {
@@ -230,12 +237,19 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.Started {
-		return nil, errors.New("upload already started")
+	if u.Finished {
+		return nil, errors.New("upload already finished")
 	}
+	wasStarted := u.Started
 	u.Started = true
 	u.Files = files
 	u.Staging = filepath.Join(u.Dest, CacheDirName, UploadsTmpDir, u.ID)
+	// A restart wipes the previous staging dir — the new manifest is
+	// the only source of truth (mixed old/new .part files would be
+	// unverifiable against the new declared hashes).
+	if wasStarted {
+		_ = os.RemoveAll(u.Staging)
+	}
 	if err := os.MkdirAll(u.Staging, 0o755); err != nil {
 		u.Started = false
 		return nil, fmt.Errorf("create staging dir: %w", err)
@@ -249,6 +263,9 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 			return nil, fmt.Errorf("stage %s: %w", f.Path, err)
 		}
 		fh.Close()
+	}
+	if wasStarted {
+		logx.Warn("upload", "slot %s restarted by the phone: state reset, staging wiped", u.ID)
 	}
 	return u, nil
 }
@@ -412,6 +429,15 @@ func (u *Upload) StoreChunk(i, c int, chunk []byte, declaredHash string) error {
 		return ErrBadChunk
 	}
 	return u.storeChunk(u.Files[i], c, chunk, declaredHash)
+}
+
+// ExpectedChunkSize returns the declared byte length of chunk c of
+// file index i (0 when out of range) — for logging and validation.
+func (u *Upload) ExpectedChunkSize(i, c int) int64 {
+	if i < 0 || i >= len(u.Files) {
+		return 0
+	}
+	return chunkExpectedSize(u.Files[i], c)
 }
 
 // chunkExpectedSize returns the declared byte length of chunk c.

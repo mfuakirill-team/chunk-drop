@@ -181,7 +181,7 @@ every upload).
 |---|---|
 | 🔒 `POST /api/upload/new` | Dashboard mints a slot: `{"id","key"}` (RAM-only, 24 h TTL) |
 | 🔒 `POST /api/upload/close` | Dashboard kills a link: body `{"key":"<upload-key>"}`; wipes its staging |
-| `POST /api/upload/start` | Body: `{"files":[{path,size,chunkCount,hashes,mtime}…]}` (browser-built manifest); engine validates §8 paths, chunk math, hash shape, caps → `{"id","files","bytes"}` |
+| `POST /api/upload/start` | Body: `{"files":[{path,size,chunkCount,hashes,mtime}…]}` (browser-built manifest); engine validates §8 paths, chunk math, hash shape, caps → `{"id","files","bytes"}`. A started-but-not-finished slot may be started **again**: state resets, staging is wiped, everything re-uploads (phone lost its connection and re-picked files) |
 | `PUT /api/upload/{uploadId}/chunk/{f}/{c}` | Body: chunk bytes + `X-Chunk-Hash` header; engine verifies against **both** the header and the declared manifest hash before ack; body capped at exactly one chunk |
 | `POST /api/upload/{uploadId}/finish` | Engine checks completeness + sizes, renames each staged file into place (atomic, same filesystem), stamps the phone's mtime, refreshes the sync state; idempotent on retry |
 
@@ -189,6 +189,10 @@ Normative details:
 - Upload sessions are RAM-only with a 24 h TTL — same lifetime as
   receive sessions; a duplicate finish after a lost response still
   returns `200` (the finished upload authenticates until expiry).
+- A restarted slot is safe: staging lives only under the excluded
+  `hashes/uploads/` tree, a restart wipes it, and finish re-verifies
+  every staged byte (size + SHA-256 against the current manifest) —
+  stale bytes from the aborted attempt can never land.
 - The `{uploadId}` in the URL path must belong to the authenticated
   key; a mismatch gets the generic `404` (nothing about other slots).
 - Uploads land in the **sync folder** by default so they propagate to

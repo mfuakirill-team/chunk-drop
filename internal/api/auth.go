@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 
+	"chunkdrop/internal/logx"
 	"chunkdrop/internal/session"
 )
 
@@ -32,6 +33,7 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 func (s *Server) authAny(w http.ResponseWriter, r *http.Request) (*session.Session, bool) {
 	key := r.Header.Get(HeaderKey)
 	if key == "" {
+		logx.Warn("auth", "401 on %s: no key header (from %s)", r.URL.Path, r.RemoteAddr)
 		http.Error(w, ErrNoSession, http.StatusUnauthorized)
 		return nil, false
 	}
@@ -42,6 +44,7 @@ func (s *Server) authAny(w http.ResponseWriter, r *http.Request) (*session.Sessi
 			return sess, true
 		}
 		if err == session.ErrExpired {
+			logx.Warn("auth", "410 on %s: session %s expired", r.URL.Path, id)
 			http.Error(w, ErrGone, http.StatusGone)
 			return nil, false
 		}
@@ -50,6 +53,7 @@ func (s *Server) authAny(w http.ResponseWriter, r *http.Request) (*session.Sessi
 	if sess, ok := s.Sessions.ByKey(key); ok {
 		return sess, true
 	}
+	logx.Warn("auth", "401 on %s: wrong/unknown session key (from %s)", r.URL.Path, r.RemoteAddr)
 	http.Error(w, ErrNoSession, http.StatusUnauthorized)
 	return nil, false
 }
@@ -59,7 +63,13 @@ func (s *Server) authAny(w http.ResponseWriter, r *http.Request) (*session.Sessi
 // session at arbitrary filesystem paths (SECURITY.md §6).
 func (s *Server) authStart(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.GroupKey == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get(HeaderKey)), []byte(s.GroupKey)) != 1 {
+		if s.GroupKey == "" {
+			logx.Warn("auth", "401 on %s: no group key configured", r.URL.Path)
+			http.Error(w, ErrNoSession, http.StatusUnauthorized)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get(HeaderKey)), []byte(s.GroupKey)) != 1 {
+			logx.Warn("auth", "401 on %s: wrong group key (from %s)", r.URL.Path, r.RemoteAddr)
 			http.Error(w, ErrNoSession, http.StatusUnauthorized)
 			return
 		}

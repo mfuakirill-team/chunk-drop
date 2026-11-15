@@ -7,9 +7,11 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"chunkdrop/internal/activity"
 	"chunkdrop/internal/discovery"
+	"chunkdrop/internal/logx"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/upload"
@@ -154,7 +156,50 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/upload/{uploadId}/chunk/{f}/{c}", s.authUpload(s.handleUploadChunk))
 	mux.HandleFunc("POST /api/upload/{uploadId}/finish", s.authUpload(s.handleUploadFinish))
 
-	return mux
+	return requestLog(mux)
+}
+
+// statusWriter records the response code so the debug middleware can
+// log method/path/status/duration per request.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.code = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.code == 0 {
+		w.code = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// requestLog logs every request at debug level — method, path, status,
+// duration and source. With -debug this is the "each step" record of
+// what the engine actually served; at info and above it stays silent.
+func requestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w}
+		start := time.Now()
+		defer func() {
+			if rec := recover(); rec != nil {
+				logx.Error("http", "panic serving %s %s: %v", r.Method, r.URL.Path, rec)
+				if sw.code == 0 {
+					http.Error(sw, `{"error":"internal error"}`, http.StatusInternalServerError)
+				}
+			}
+			logx.Debug("http", "%s %s -> %d (%s) from %s",
+				r.Method, r.URL.Path, sw.code, time.Since(start).Round(time.Millisecond), r.RemoteAddr)
+		}()
+		next.ServeHTTP(sw, r)
+		if sw.code >= 500 {
+			logx.Error("http", "%s %s -> %d", r.Method, r.URL.Path, sw.code)
+		}
+	})
 }
 
 // uiHandler serves the embedded web app. strip selects the /r/ mount

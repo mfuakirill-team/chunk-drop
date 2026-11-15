@@ -177,7 +177,7 @@ export function ActivityPanel({ send }: { send: SendState | null }) {
               ▲ receiving now: {liveReceiver.receiver} (
               {Object.keys(liveReceiver.have).length} file(s) in progress)
             </p>
-          ) : (
+          ) : (act?.incoming?.length ?? 0) > 0 ? null : (
             <p class="muted" style="margin:4px 0">
               {act && act.uploads.length > 0
                 ? `${act.uploads.length} live session(s) waiting for a receiver`

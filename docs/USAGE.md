@@ -117,10 +117,25 @@ directory.
 ./engine                    # port from config (default 8090)
 ./engine -port 8091         # one-off port override
 ./engine -bind 192.168.1.20  # pin the advertised LAN IP (see §5.4)
+./engine -debug             # verbose logs: every request, chunk, step
+./engine -log-level warn    # quiet: info hidden (debug|info|warn|error)
 ./engine help               # all flags
 ./engine version
 ./engine keygen             # fresh group key (see §2.1)
 ```
+
+**Log levels** (`-log-level`, or `-debug` as shorthand for `debug`):
+
+| Level    | Shows                                                                    |
+|----------|--------------------------------------------------------------------------|
+| `debug`  | everything — every HTTP request (method/path/status/duration), every stored chunk, every auth decision |
+| `info`   | the default — transfer milestones: slot minted/started/restarted/finished, files landed, sync events |
+| `warn`   | info + recovered problems: rejected chunks, wrong keys (401), finish refusals (400), restarts |
+| `error`  | failures only — panics, staging errors, 5xx responses                    |
+
+Lines look like `engine: [warn] upload: slot <id> restarted by the phone: state reset, staging wiped`.
+**When something misbehaves, run `./engine -debug` and retry** — every step
+and every error reason ends up on stderr.
 
 Startup output:
 
@@ -245,8 +260,9 @@ subnet). Nothing installed, no account, no app.
 3. Tap **Save all…**
    - Phone asks *where* to save (iOS: Files app location; Android:
      Downloads or a folder you pick) — confirm once.
-   - Files stream chunk-by-chunk, each chunk SHA-256-verified, retried
-     up to 3× with backoff on network hiccups.
+   - Files stream chunk-by-chunk, each chunk SHA-256-verified; network
+     hiccups are retried patiently (20 s patience window) instead of
+     killing the transfer.
 4. Per-file ✓ marks and a log appear live; sender sees the same progress.
 5. Done → "Done — files saved." Open the Files app / Downloads folder.
 
@@ -456,7 +472,8 @@ silently — run via right-click → **Run anyway** once.
 
 | Event | What happens |
 |---|---|
-| Wi-Fi blip mid-transfer | Chunk retries (up to 3, backoff). Transfer continues. |
+| Wi-Fi blip / 5 s airplane-mode mid-transfer | Chunk retries patiently: network failures keep retrying for **20 s** (backoff up to 4 s per pause) — the phone waits out the blackout and resumes where it stopped. Engine answers (400/401) are final after 3 tries. |
+| Phone gave up anyway (network lost > 20 s) | The transfer is **not** marked done; the phone shows the real error. Pick the files again on the phone — the same link restarts cleanly (slot state resets, staging wiped, everything re-uploads). |
 | Close receiver tab mid-transfer | In M0: transfer stops. Reopen link → session gone → fresh transfer. (Resume is M3.) |
 | `Ctrl+C` engine | Sessions die (RAM-only). Restart → new QR. |
 | Engine machine reboot | Same as `Ctrl+C`. |
@@ -515,6 +532,8 @@ your `PUID`/`PGID`.
 | "Open a phone upload link" is greyed out | Set the group key in the dashboard first (the link is minted by the engine, which needs the key). |
 | Phone says the computer rejected the transfer | The engine validates names/paths (`docs/PROTOCOL.md` §8) and size caps — rename the file (no `../`, no Windows-reserved names) or raise `max_upload_bytes`. |
 | "Session key rejected"/401 on the phone after it worked | The link was closed (or the engine restarted — upload state is RAM-only). Open a new link. |
+| "HTTP 400" after re-picking files mid-transfer | Fixed: a started-but-not-finished link now **restarts** cleanly (state reset, staging wiped, re-upload from scratch — staged bytes are re-verified by finish, so nothing stale can land). If you still see it, the link already finished or expired — open a new one. |
+| Phone says "upload incomplete — N of M files abandoned" | The network dropped longer than the 20 s patience window. Stay connected and pick the files again; with `-debug` the engine log shows exactly which chunk failed and why. |
 | Files didn't arrive but the phone says "Sent" | Check the destination: the **sync folder** by default, or `receive_dir` if set. The dashboard's Activity feed logs every landed file. |
 | Phone picks a folder but files arrive flat | Firefox (some versions) ignores folder picks — it sends files without their folder prefix. Use Chrome/Safari on the phone, or accept the flat batch. |
 | A `hashes/uploads/` folder in the sync folder | That's upload staging — never synced, never announced, auto-cleared. Leave it. |

@@ -29,6 +29,7 @@ import (
 	"chunkdrop/internal/config"
 	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/lanip"
+	"chunkdrop/internal/logx"
 	"chunkdrop/internal/picker"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
@@ -61,8 +62,22 @@ func main() {
 	fs := flag.NewFlagSet("engine", flag.ExitOnError)
 	port := fs.Int("port", 0, "port to bind (default from config, 8090)")
 	bind := fs.String("bind", "", "IP to bind + advertise in QR (default: auto)")
+	logLevel := fs.String("log-level", "", "log level: debug|info|warn|error (default info)")
+	debug := fs.Bool("debug", false, "debug mode — verbose logging of every step and error")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		log.Fatal(err)
+	}
+	// -debug is shorthand for -log-level debug; both filter everything
+	// through internal/logx (docs/USAGE.md §3).
+	if *debug {
+		*logLevel = "debug"
+	}
+	if *logLevel != "" {
+		lvl, err := logx.ParseLevel(*logLevel)
+		if err != nil {
+			log.Fatal(err)
+		}
+		logx.SetLevel(lvl)
 	}
 
 	if err := run(*port, *bind); err != nil {
@@ -79,6 +94,8 @@ Usage:
   engine -port 8090      override the port
   engine -bind 192.168.1.20
                           force the advertised IP (VPN adapter workaround)
+  engine -debug          verbose logs: every request, chunk and step
+  engine -log-level warn hide info lines (debug|info|warn|error)
 
 Config: ~/.config/chunkdrop/engine.toml (Linux)
         %APPDATA%\chunkdrop\engine.toml (Windows)
@@ -171,7 +188,7 @@ func run(portFlag int, bindFlag string) error {
 			} else {
 				srv.Sync = local
 				act.Add(activity.KindInfo, "sync folder: "+dir)
-				puller := &syncmesh.Puller{GroupKey: cfg.GroupKey, Logf: log.Printf, Act: act}
+				puller := &syncmesh.Puller{GroupKey: cfg.GroupKey, Logf: logx.Adapter(logx.LevelInfo, "sync"), Act: act}
 				syncRunner := &syncmesh.Runner{
 					Local:    local,
 					Puller:   puller,
@@ -190,7 +207,7 @@ func run(portFlag int, bindFlag string) error {
 						}
 						return out
 					},
-					Logf: log.Printf,
+					Logf: logx.Adapter(logx.LevelInfo, "sync"),
 					Act:  act,
 				}
 				go syncRunner.Run(syncStop)

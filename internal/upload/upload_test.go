@@ -124,8 +124,23 @@ func TestStoreChunkAndFinish(t *testing.T) {
 
 	// Finish before completeness is refused — but the empty file has
 	// nothing to receive, so only f0 gates it.
-	if _, err := mgr.Start(up.KeyEncoded(), specs, 1<<30); err == nil {
-		t.Error("double start accepted")
+	// A second start RESETS the slot (restart allowed): have-bitmaps
+	// cleared, staging wiped — finish now requires a fresh upload.
+	if _, err := mgr.Start(up.KeyEncoded(), specs, 1<<30); err != nil {
+		t.Fatalf("restart start: %v", err)
+	}
+	f0 = up.Files[0] // Start rebuilds the file list (fresh *File values)
+	if f0.Have() != 0 || f0.HaveAll() {
+		t.Errorf("restart did not reset have-state: have=%d all=%v", f0.Have(), f0.HaveAll())
+	}
+	if f0.TmpPath == "" {
+		t.Fatal("restart lost the staging path")
+	}
+	if st, err := os.Stat(f0.TmpPath); err != nil || st.Size() != 0 {
+		t.Errorf("restarted staging file: %v (size %d)", err, st.Size())
+	}
+	if err := up.storeChunk(f0, 0, payload, hash); err != nil {
+		t.Fatalf("re-storeChunk: %v", err)
 	}
 	landed, err := up.Finish()
 	if err != nil {

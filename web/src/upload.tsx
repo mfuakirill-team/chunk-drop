@@ -141,7 +141,9 @@ export function UploadPage({ uploadKey }: Props) {
           setUpTotal(total);
         },
         onChunkError: (path, _c, e, attempt) => {
-          setNote(attempt < 3 ? `${path}: retrying (${e})` : `${path}: giving up (${e})`);
+          // The pipeline owns the give-up decision; until `done` rejects
+          // this stays a retry note.
+          setNote(`${path}: retrying (attempt ${attempt} — ${e.message})`);
         },
       },
     );

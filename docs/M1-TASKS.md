@@ -65,15 +65,30 @@ PCs through the existing sync mesh.
       cache so peers pick the file up, activity feed events.
 - [x] `/u/` mount (public like `/r/`): `web/src/upload.tsx` — file/folder
       pick, client-built manifest (hash-wasm SHA-256, 4 MiB chunks),
-      2 chunks in flight, 3 retries with backoff, progress, no
-      dashboard-back affordance.
+      2 chunks in flight, patient retry (20 s network-patience window),
+      progress, no dashboard-back affordance.
 - [x] Dashboard "Receive from phone" card: QR of `/u/#k=<upload-key>`,
       copy link, close-link button.
 - [x] Tests: full flow (start → chunk → finish), wrong key 401, hash
       mismatch rejection, size-cap reject, sanitize/collision on paths,
       tmp files invisible to sync scan, finish populates sync state.
 
-### 3. M0 leftovers (not blocking M1)
+### 3. Post-device-test fixes (from DEVICE-TESTS runs)
+- [x] Activity panel showed "idle — no transfers in flight" while a
+      phone was pushing — the idle line is now suppressed while
+      incoming upload lines render.
+- [x] Airplane-mode test → HTTP 400: client retry budget was ~1.75 s;
+      now `withRetry` gives a **20 s patience window** for network
+      errors (hard cap 3 attempts for engine answers), the pipeline
+      throws a clear "incomplete" error instead of finish-with-gaps,
+      and the engine **restarts** a started-not-finished slot on a new
+      `start` (staging wiped, bytes re-verified by finish).
+- [x] Debug-mode logging: `internal/logx` (debug/info/warn/error),
+      `-debug` / `-log-level` flags, every HTTP request + handler
+      failure logged; `httpError` now surfaces the engine's JSON error
+      body on the phone/dashboard instead of a blind "HTTP 400".
+
+### 4. M0 leftovers (not blocking M1)
 - [ ] Device test matrix (M0-TASKS step 9) — needs real hardware.
 - [ ] Distribution (step 10) — blocked on repo name / public-private /
       license decisions (PLAN §6).

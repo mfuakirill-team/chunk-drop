@@ -56,13 +56,13 @@ function headers(key: string): HeadersInit {
 
 export async function fetchManifest(key: string): Promise<Manifest> {
   const r = await fetch("/api/manifest", { headers: headers(key) });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
   return r.json();
 }
 
 export async function fetchSession(key: string): Promise<SessionInfo> {
   const r = await fetch("/api/session", { headers: headers(key) });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
   return r.json();
 }
 
@@ -76,7 +76,7 @@ export async function postProgress(
     headers: { ...headers(key), "Content-Type": "application/json" },
     body: JSON.stringify({ receiver, have }),
   });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
 }
 
 export async function postCancel(key: string): Promise<void> {
@@ -84,20 +84,74 @@ export async function postCancel(key: string): Promise<void> {
     method: "POST",
     headers: headers(key),
   });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
 }
 
-export function httpError(r: Response): Error & { status?: number } {
-  const err = new Error(`HTTP ${r.status}`) as Error & { status?: number };
-  err.status = r.status;
-  return err;
+export async function httpError(r: Response): Promise<Error & { status?: number }> {
+	let msg = `HTTP ${r.status}`;
+	try {
+		const body = await r.json();
+		if (body && typeof body.error === "string" && body.error) {
+			msg = `${body.error} (HTTP ${r.status})`;
+		}
+	} catch {
+		// non-JSON body: keep the status-code message
+	}
+	const err = new Error(msg) as Error & { status?: number };
+	err.status = r.status;
+	return err;
+}
+
+// Classify an error from fetch(): network-level failures (offline, DNS
+// refused) are *transient* — worth patient retries; HTTP errors from
+// the engine are final answers, not connection luck.
+export function isNetworkError(err: unknown): boolean {
+	if (err instanceof TypeError) return true; // fetch() network failure
+	const msg = String((err as Error)?.message ?? "");
+	return /failed to fetch|networkerror|network request failed|load failed|connection refused|err_connection/i.test(msg);
+}
+
+// Retry budget: a hard attempt cap for any error, plus a *patience
+// window* for transient network errors — a 5 s airplane-mode or a
+// Wi-Fi blip no longer kills the transfer; the pipeline waits the
+// connection out and resumes where it stopped.
+export interface RetryPolicy {
+	attempts: number; // hard cap per chunk, any error kind
+	patienceMs: number; // keep retrying network errors until this long
+}
+
+export const DEFAULT_RETRY: RetryPolicy = { attempts: 3, patienceMs: 20_000 };
+
+export async function withRetry(
+	run: () => Promise<void>,
+	policy: RetryPolicy,
+	onRetry: (attempt: number, err: Error, waitMs: number) => void,
+): Promise<void> {
+	const startedAt = Date.now();
+	for (let attempt = 1; ; attempt++) {
+		try {
+			await run();
+			return;
+		} catch (err) {
+			const e = err as Error;
+			const network = isNetworkError(e);
+			const waited = Date.now() - startedAt;
+			if (!network && attempt >= policy.attempts) throw e;
+			if (network && waited >= policy.patienceMs) {
+				throw new Error(`network lost for ${Math.round(waited / 1000)}s — giving up (${e.message})`);
+			}
+			const waitMs = Math.min(250 * 2 ** Math.min(attempt - 1, 4), 4000);
+			onRetry(attempt, e, waitMs);
+			await sleep(waitMs);
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
 // Chunk pipeline (docs/PROTOCOL.md §4 receiver behavior, normative):
 // sequential per file, 2–3 in flight, hash-wasm SHA-256 verify,
-// 3 retries with backoff, per-chunk error surface — a bad moment on
-// WiFi never restarts the transfer.
+// patient retry (withRetry, DEFAULT_RETRY), per-chunk error surface —
+// a bad moment on WiFi never restarts the transfer.
 // ---------------------------------------------------------------------------
 
 export type ChunkSink = (file: ManifestFile, chunk: number, bytes: Uint8Array) => Promise<void>;
@@ -123,7 +177,6 @@ export async function sha256Hex(data: Uint8Array): Promise<string> {
   return h.digest("hex");
 }
 
-const RETRIES = 3;
 const IN_FLIGHT = 3;
 
 async function fetchChunk(
@@ -134,7 +187,7 @@ async function fetchChunk(
   const r = await fetch(`/api/chunk/${fileIndex}/${chunk}`, {
     headers: headers(key),
   });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
   const hash = r.headers.get("X-Chunk-Hash");
   const bytes = new Uint8Array(await r.arrayBuffer());
   return { bytes, hash };
@@ -177,31 +230,30 @@ export function download(
         while (!cancelled) {
           const c = next++;
           if (c >= file.chunkCount) return;
-          let ok = false;
-          for (let attempt = 1; attempt <= RETRIES && !cancelled; attempt++) {
-            try {
-              const { bytes, hash } = await fetchChunk(key, file.index, c);
-              const digest = await sha256Hex(bytes);
-              if (hash && hash !== digest) {
-                throw new Error(
-                  `hash mismatch on ${file.path}#${c} (server ${hash} != local ${digest})`,
-                );
-              }
-              if (digest !== file.hashes[c]) {
-                throw new Error(`hash mismatch on ${file.path}#${c} (manifest)`);
-              }
-              await sink(file, c, bytes);
-              fileHave.push(c);
-              doneCount++;
-              cb.onChunk(file, c, doneCount, file.chunkCount);
-              ok = true;
-              break;
-            } catch (err) {
-              cb.onChunkError(file, c, err as Error, attempt);
-              if (attempt < RETRIES) await sleep(250 * 2 ** (attempt - 1));
-            }
-          }
-          if (!ok && !cancelled) {
+          try {
+            // Patient retry: network blips wait the connection out
+            // (20 s window), engine answers are final after 3 tries.
+            await withRetry(
+              async () => {
+                const { bytes, hash } = await fetchChunk(key, file.index, c);
+                const digest = await sha256Hex(bytes);
+                if (hash && hash !== digest) {
+                  throw new Error(
+                    `hash mismatch on ${file.path}#${c} (server ${hash} != local ${digest})`,
+                  );
+                }
+                if (digest !== file.hashes[c]) {
+                  throw new Error(`hash mismatch on ${file.path}#${c} (manifest)`);
+                }
+                await sink(file, c, bytes);
+              },
+              DEFAULT_RETRY,
+              (attempt, err) => cb.onChunkError(file, c, err, attempt),
+            );
+            fileHave.push(c);
+            doneCount++;
+            cb.onChunk(file, c, doneCount, file.chunkCount);
+          } catch {
             // per-chunk error surface: give up on this file, keep others
             return;
           }
@@ -298,7 +350,7 @@ export async function postUploadNew(
     method: "POST",
     headers: { [KEY_HEADER]: groupKey },
   });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
   return r.json();
 }
 
@@ -308,7 +360,7 @@ export async function postUploadClose(groupKey: string, key: string): Promise<vo
     headers: { [KEY_HEADER]: groupKey, "Content-Type": "application/json" },
     body: JSON.stringify({ key }),
   });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
 }
 
 export async function postUploadStart(
@@ -320,7 +372,7 @@ export async function postUploadStart(
     headers: { ...headers(key), "Content-Type": "application/json" },
     body: JSON.stringify({ files }),
   });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
   return r.json();
 }
 
@@ -337,7 +389,7 @@ async function putUploadChunk(
     headers: { ...headers(key), "Content-Type": "application/octet-stream", "X-Chunk-Hash": hash },
     body: bytes as unknown as BlobPart,
   });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
 }
 
 export async function postUploadFinish(key: string, id: string): Promise<void> {
@@ -345,7 +397,7 @@ export async function postUploadFinish(key: string, id: string): Promise<void> {
     method: "POST",
     headers: headers(key),
   });
-  if (!r.ok) throw httpError(r);
+  if (!r.ok) throw await httpError(r);
 }
 
 export interface UploadCallbacks {
@@ -361,7 +413,11 @@ export interface UploadHandle {
 const UP_IN_FLIGHT = 2;
 
 /** Run the upload pipeline: sequential per file, 2 chunks in flight,
- * 3 retries with backoff — the receive pipeline mirrored. */
+ * patient retries with backoff — the receive pipeline mirrored. If any
+ * file is abandoned (retry budget exhausted) the pipeline throws a
+ * clear "incomplete" error instead of calling finish with gaps — the
+ * engine would refuse it anyway, and the real reason is the lost
+ * chunks, not a 400. */
 export function uploadPipeline(
   key: string,
   id: string,
@@ -374,6 +430,7 @@ export function uploadPipeline(
   let bytesDone = 0;
   let chunksDone = 0;
   const chunksTotal = specs.reduce((n, s) => n + s.chunkCount, 0);
+  const abandoned: string[] = [];
 
   const done = (async () => {
     for (let i = 0; i < specs.length && !cancelled; i++) {
@@ -384,23 +441,24 @@ export function uploadPipeline(
         while (!cancelled) {
           const c = next++;
           if (c >= spec.chunkCount) return;
-          let ok = false;
-          for (let attempt = 1; attempt <= RETRIES && !cancelled; attempt++) {
-            try {
-              const bytes = await source(i, c);
-              const digest = await sha256Hex(bytes);
-              await putUploadChunk(key, id, i, c, bytes, digest);
-              chunksDone++;
-              bytesDone += bytes.length;
-              cb.onProgress(chunksDone, chunksTotal, bytesDone, bytesTotal);
-              ok = true;
-              break;
-            } catch (err) {
-              cb.onChunkError(spec.path, c, err as Error, attempt);
-              if (attempt < RETRIES) await sleep(250 * 2 ** (attempt - 1));
-            }
+          try {
+            await withRetry(
+              async () => {
+                const bytes = await source(i, c);
+                const digest = await sha256Hex(bytes);
+                await putUploadChunk(key, id, i, c, bytes, digest);
+                bytesDone += bytes.length;
+              },
+              DEFAULT_RETRY,
+              (attempt, err) => cb.onChunkError(spec.path, c, err, attempt),
+            );
+            chunksDone++;
+            cb.onProgress(chunksDone, chunksTotal, bytesDone, bytesTotal);
+          } catch {
+            // give up on this file, keep others
+            abandoned.push(spec.path);
+            return;
           }
-          if (!ok && !cancelled) return; // give up on this file, keep others
         }
       };
       const workers: Promise<void>[] = [];
@@ -408,6 +466,11 @@ export function uploadPipeline(
       await Promise.all(workers);
     }
     if (cancelled) return;
+    if (abandoned.length > 0) {
+      throw new Error(
+        `upload incomplete — ${abandoned.length} of ${specs.length} file(s) abandoned: ${abandoned.join(", ")}`,
+      );
+    }
     await postUploadFinish(key, id);
   })();
 
