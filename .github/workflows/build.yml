@@ -49,13 +49,35 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
-      - name: Upload artifacts
+      # One artifact per binary: download-artifact always comes as a
+      # zip, so separate artifacts let you fetch just the engine for
+      # your OS instead of one zip holding all four. Raw, unzipped
+      # files live on Releases (release.yml) — this is the test-drive
+      # path for a branch build.
+      - name: Upload engine-windows-amd64.exe
         uses: actions/upload-artifact@v4
         with:
-          name: engines-${{ github.sha }}
-          path: |
-            bin/engine-windows-amd64.exe
-            bin/engine-linux-amd64
-            bin/engine-linux-arm64
-            bin/engine-darwin-arm64
+          name: engine-windows-amd64.exe
+          path: bin/engine-windows-amd64.exe
+          if-no-files-found: error
+
+      - name: Upload engine-linux-amd64
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-linux-amd64
+          path: bin/engine-linux-amd64
+          if-no-files-found: error
+
+      - name: Upload engine-linux-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-linux-arm64
+          path: bin/engine-linux-arm64
+          if-no-files-found: error
+
+      - name: Upload engine-darwin-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-darwin-arm64
+          path: bin/engine-darwin-arm64
           if-no-files-found: error
