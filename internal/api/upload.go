@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 
 	"chunkdrop/internal/activity"
+	"chunkdrop/internal/diskspace"
 	"chunkdrop/internal/logx"
 	"chunkdrop/internal/transfer"
 	"chunkdrop/internal/upload"
@@ -107,6 +109,14 @@ func (s *Server) handleUploadStart(up *upload.Upload, w http.ResponseWriter, r *
 		return
 	}
 	if _, err := s.Uploads.Start(up.KeyEncoded(), body.Files, s.maxUploadBytes()); err != nil {
+		// A disk-space rejection is worth a dashboard line: the phone
+		// sees the 400 body, but the PC side should know too (with
+		// the numbers — the message carries need/free/reserved).
+		var nse *diskspace.NoSpaceError
+		if errors.As(err, &nse) {
+			s.Activity.Add(activity.KindError, fmt.Sprintf(
+				"phone upload rejected: %s (destination %s)", nse.Error(), up.Dest))
+		}
 		logx.Warn("upload", "start rejected for slot %s: %v", up.ID, err)
 		http.Error(w, quoteErr(err), http.StatusBadRequest)
 		return

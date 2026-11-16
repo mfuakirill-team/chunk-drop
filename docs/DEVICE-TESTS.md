@@ -84,6 +84,13 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
       `/api/upload/new`) returns the generic **404** even with the
       group key (`USAGE.md` §5.0) — remote `/r/` and `/u/` pages still
       work.
+- [x] **Disk-space gate**: start a batch declaring more bytes than the
+      destination drive has free (curl `/api/upload/start` with a big
+      declared size — verified live: 40 GiB batch against ~45 GiB free
+      with a 30 GiB batch in flight → 400 `not enough disk space:
+      need… free… reserved… available…`; dashboard gets the error
+      line; after closing the 30 GiB link the 40 GiB batch starts).
+      (`SECURITY.md` §6, `USAGE.md` §5.12)
 
 ## F. Restart behavior
 

@@ -547,6 +547,9 @@ your `PUID`/`PGID`.
 |---|---|
 | "Open a phone upload link" is greyed out | Set the group key in the dashboard first (the link is minted by the engine, which needs the key). |
 | Phone says the computer rejected the transfer | The engine validates names/paths (`docs/PROTOCOL.md` §8) and size caps — rename the file (no `../`, no Windows-reserved names) or raise `max_upload_bytes`. |
+| "not enough disk space: need X, Y free, Z reserved → A available" | The batch wouldn't fit the destination **directory's own filesystem** once other transfers in flight are counted. Free up space (or move `receive_dir` to a bigger drive in `engine.toml`) and send again — nothing was written, the phone just retries. The dashboard's Activity feed logs the same numbers. Mesh pulls refuse
+the same way — the pull is retried next sync round, so free up space
+and it lands then. |
 | "Session key rejected"/401 on the phone after it worked | The link was closed (or the engine restarted — upload state is RAM-only). Open a new link. |
 | "Send more" after a finished transfer | Works — the same link takes another batch (each batch re-uploads from scratch; staged bytes are re-verified by finish, so nothing stale can land). If the phone reports 401 instead, the link was closed, expired, or the engine restarted — rescan the QR. |
 | Dashboard QR dead / re-scanning gives errors | The card keeps the QR while the link lives — through any number of batches. It **mints a fresh one automatically** only when the link ends on its own (24 h expiry, engine restart) or you closed it (closing is terminal; press the mint button for a new link). |

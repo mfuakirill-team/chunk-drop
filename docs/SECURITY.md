@@ -65,8 +65,16 @@ Engine:
       names, unicode, collisions, trailing dots)
 - [x] Per-chunk hash verification on upload (M1) before anything hits disk
 - [x] Total-size cap in config (`max_upload_bytes`, default 100 GiB)
-- [ ] Disk-space check before accepting an upload (not implemented yet —
-      a full disk currently fails the chunk write mid-transfer)
+- [x] Disk-space check before accepting a transfer — checked on the
+      destination directory's **own filesystem** (sync folder,
+      receive_dir, ramdisk: each gets its own check), against
+      `available = statfs free − bytes already reserved by other
+      transfers in flight`. A RAM-only ledger tracks not-yet-written
+      bytes per transfer (shrinks as chunks land; released on
+      finish/close/expire/fail; restart clears it). Phone batches are
+      refused at start (400 + dashboard error line); mesh pulls fail
+      with the numbers in the log; the error message always carries
+      need / free / reserved / available.
 - [x] Session auto-expiry (24 h) and manual cancel; sessions RAM-only
 - [x] Bind only to the chosen LAN interface, not `0.0.0.0`, when possible
 

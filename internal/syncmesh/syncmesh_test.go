@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"chunkdrop/internal/activity"
+	"chunkdrop/internal/diskspace"
 	"chunkdrop/internal/transfer"
 )
 
@@ -336,6 +337,61 @@ func assertNoParts(t *testing.T, syncDir string) {
 		t.Fatal(err)
 	}
 }
+
+// A pull that does not fit the sync folder's filesystem is refused
+// before any byte is written, and the ledger is released again.
+func TestPullNoSpace(t *testing.T) {
+	src := bytes.Repeat([]byte("x"), 1024)
+	l, dir := testLocal(t, nil)
+	led := &fakeLedger{}
+	p := &Puller{GroupKey: "k", Act: activity.NewLog(16), Logf: t.Logf, Space: led}
+
+	peer := fakePeer(t, src, false)
+	n := &Needed{Rel: "big.bin", Peers: []string{"fake"}, Size: int64(len(src))}
+	if err := p.Pull(l, n, []PeerRef{peer}); err == nil {
+		t.Fatal("full-disk pull must fail")
+	}
+	if !strings.Contains(led.lastErr.Error(), "not enough disk space") {
+		t.Errorf("pull error lacks the disk-space message: %v", led.lastErr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, CacheDirName, "tmp", "big.bin"+PartSuffix)); !os.IsNotExist(err) {
+		t.Errorf("part file written despite no space: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "big.bin")); !os.IsNotExist(err) {
+		t.Errorf("file landed despite no space: %v", err)
+	}
+
+	// Ledger accepts → pull proceeds, bytes are written down, release
+	// happens on success.
+	led.ok = true
+	if err := p.Pull(l, n, []PeerRef{peer}); err != nil {
+		t.Fatalf("pull with space: %v", err)
+	}
+	if got := led.writtenTotal; got != int64(len(src)) {
+		t.Errorf("written total = %d, want %d", got, len(src))
+	}
+	if !led.released {
+		t.Error("ledger not released after the pull")
+	}
+}
+
+// fakeLedger is a diskspace.Ledger stub: refuses until .ok is set.
+type fakeLedger struct {
+	ok           bool
+	lastErr      error
+	writtenTotal int64
+	released     bool
+}
+
+func (f *fakeLedger) Reserve(dir, id string, size int64) error {
+	if !f.ok {
+		f.lastErr = &diskspace.NoSpaceError{Need: size, Free: 10, Reserved: 0}
+		return f.lastErr
+	}
+	return nil
+}
+func (f *fakeLedger) Written(dir, id string, n int64) { f.writtenTotal += n }
+func (f *fakeLedger) Release(dir, id string)          { f.released = true }
 
 // The deletion resurrection livelock: user deletes a file here, but a
 // peer still inside its own delete grace keeps announcing it, so the

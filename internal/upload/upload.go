@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"chunkdrop/internal/diskspace"
 	"chunkdrop/internal/logx"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/transfer"
@@ -97,8 +98,14 @@ type Upload struct {
 	Started   bool
 	Finished  bool
 
+	space diskspace.Ledger // disk-space ledger (nil = no accounting)
+	resID string           // reservation id in that ledger
+
 	mu sync.Mutex
 }
+
+// reserveID is this upload's reservation id in the disk-space ledger.
+func (u *Upload) reserveID() string { return "upload:" + u.ID }
 
 // BytesDone returns the received-bytes total across all files (each
 // arrived chunk counts its declared size — the last may be short).
@@ -188,6 +195,12 @@ type Manager struct {
 	mu      sync.Mutex
 	uploads map[string]*Upload
 	ttl     time.Duration
+
+	// Space is the disk-space ledger: every accepted batch reserves
+	// its declared size on the destination filesystem and the
+	// reservation shrinks as chunks land. Nil disables the check
+	// (tests); the engine always wires a real ledger.
+	Space diskspace.Ledger
 }
 
 // NewManager creates an upload manager with the default 24 h TTL.
@@ -208,7 +221,9 @@ func (m *Manager) NewPending(dest string) (*Upload, error) {
 		Dest:      dest,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(m.ttl),
+		space:     m.Space,
 	}
+	u.resID = "upload:" + u.ID
 	m.mu.Lock()
 	m.uploads[u.ID] = u
 	m.mu.Unlock()
@@ -233,11 +248,26 @@ func (m *Manager) Start(presentedKey string, specs []FileSpec, maxTotal int64) (
 	if err != nil {
 		return nil, err
 	}
+	var total int64
+	for _, f := range files {
+		total += f.Size
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	u, ok := m.byKeyLocked(presentedKey)
 	if !ok {
 		return nil, session.ErrNotFound
+	}
+	// Disk-space gate: the declared batch size must fit on the
+	// destination filesystem once in-flight reservations are
+	// subtracted (diskspace checks THIS dir's filesystem — the
+	// staging tree lives inside it, so the rename at finish stays
+	// same-filesystem). A restarted slot re-declares its size, which
+	// replaces the old reservation.
+	if m.Space != nil {
+		if err := m.Space.Reserve(u.Dest, u.resID, total); err != nil {
+			return nil, fmt.Errorf("%w (destination %s)", err, u.Dest)
+		}
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -334,6 +364,9 @@ func (m *Manager) Close(presentedKey string) bool {
 	if victim == nil {
 		return false
 	}
+	if victim.space != nil {
+		victim.space.Release(victim.Dest, victim.resID)
+	}
 	if victim.Staging != "" {
 		_ = os.RemoveAll(victim.Staging)
 	}
@@ -353,6 +386,9 @@ func (m *Manager) Reap() {
 	}
 	m.mu.Unlock()
 	for _, u := range expired {
+		if u.space != nil {
+			u.space.Release(u.Dest, u.resID)
+		}
 		if u.Staging != "" {
 			_ = os.RemoveAll(u.Staging)
 		}
@@ -502,6 +538,12 @@ func (u *Upload) storeChunk(f *File, c int, chunk []byte, declaredHash string) e
 	f.mu.Lock()
 	f.have[c] = true
 	f.mu.Unlock()
+	if u.space != nil {
+		// These bytes are on disk now — move them out of the
+		// reservation so free space and the ledger don't
+		// double-count them.
+		u.space.Written(u.Dest, u.resID, int64(len(chunk)))
+	}
 	return nil
 }
 
@@ -557,6 +599,13 @@ func (u *Upload) Finish() ([]Landed, error) {
 		out = append(out, Landed{Rel: f.Path, Abs: abs, Size: f.Size})
 	}
 	u.Finished = true
+	if u.space != nil {
+		// The batch is complete — staged bytes are real files in the
+		// destination now; nothing is left to reserve. (On a finish
+		// *failure* the reservation stays: the phone retries chunks
+		// or re-starts, and the bytes are still owed.)
+		u.space.Release(u.Dest, u.resID)
+	}
 	return out, nil
 }
 

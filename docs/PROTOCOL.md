@@ -186,6 +186,19 @@ every upload).
 | `POST /api/upload/{uploadId}/finish` | Engine checks completeness + sizes, renames each staged file into place (atomic, same filesystem), stamps the phone's mtime, refreshes the sync state; idempotent on retry |
 
 Normative details:
+- **Disk-space gate at start**: the declared batch size must fit on the
+  destination directory's own filesystem (sync folder / receive_dir /
+  ramdisk — never "the disk" in general) once the bytes already
+  reserved by other transfers in flight are subtracted. A batch that
+  does not fit gets `400` with a `not enough disk space` message
+  carrying need / free / reserved / available, and the dashboard's
+  activity feed logs the same numbers. Reservations are RAM-only and
+  count not-yet-written bytes (they shrink as chunks land, release on
+  finish / close / expire / fail; an engine restart clears them) —
+  mesh pulls reserve the same way on the sync folder's filesystem and
+  fail the pull (logged, activity line) when they do not fit. A failed
+  `statfs` (destination unreachable) also refuses the transfer with a
+  clear error rather than writing blind.
 - Upload sessions are RAM-only with a 24 h TTL — same lifetime as
   receive sessions; a duplicate finish after a lost response still
   returns `200` (the finished upload authenticates until expiry).

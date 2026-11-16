@@ -28,6 +28,7 @@ import (
 	"chunkdrop/internal/api"
 	"chunkdrop/internal/config"
 	"chunkdrop/internal/discovery"
+	"chunkdrop/internal/diskspace"
 	"chunkdrop/internal/lanip"
 	"chunkdrop/internal/logx"
 	"chunkdrop/internal/picker"
@@ -182,6 +183,12 @@ func run(portFlag int, bindFlag string) error {
 	// sync pulls/deletes, errors all land here.
 	act := activity.NewLog(200)
 
+	// One shared disk-space ledger for both incoming paths (mesh
+	// pulls and phone pushes): each destination directory's own
+	// filesystem is checked, in-flight transfers reserve their
+	// remaining bytes, so concurrent transfers cannot overflow a disk.
+	space := diskspace.New()
+
 	// HTTP server wiring.
 	sm := session.NewManager()
 	ui := webui.Handler()
@@ -213,7 +220,7 @@ func run(portFlag int, bindFlag string) error {
 			} else {
 				srv.Sync = local
 				act.Add(activity.KindInfo, "sync folder: "+dir)
-				puller := &syncmesh.Puller{GroupKey: cfg.GroupKey, Logf: logx.Adapter(logx.LevelInfo, "sync"), Act: act}
+				puller := &syncmesh.Puller{GroupKey: cfg.GroupKey, Logf: logx.Adapter(logx.LevelInfo, "sync"), Act: act, Space: space}
 				syncRunner := &syncmesh.Runner{
 					Local:    local,
 					Puller:   puller,
@@ -246,6 +253,7 @@ func run(portFlag int, bindFlag string) error {
 	// unless receive_dir overrides it. Leftover staging dirs from a
 	// previous run are cleared — nothing can be in flight at startup.
 	srv.Uploads = upload.NewManager()
+	srv.Uploads.Space = space
 	uploadDest := cfg.ReceiveDir
 	if uploadDest == "" {
 		if srv.Sync != nil {

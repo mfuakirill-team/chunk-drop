@@ -38,6 +38,8 @@ import (
 	"time"
 
 	"chunkdrop/internal/activity"
+	"chunkdrop/internal/diskspace"
+	"chunkdrop/internal/logx"
 	"chunkdrop/internal/transfer"
 
 	"github.com/cespare/xxhash/v2"
@@ -742,6 +744,10 @@ type Puller struct {
 	Logf     func(string, ...any)
 	// Act receives concise activity events (nil = disabled).
 	Act *activity.Log
+	// Space is the disk-space ledger: each pull reserves the file's
+	// declared size on the sync folder's filesystem and the
+	// reservation shrinks as chunks land. Nil disables the check.
+	Space diskspace.Ledger
 }
 
 // State fetches a peer's announcement (GET /api/sync/state).
@@ -849,6 +855,26 @@ func (p *Puller) Pull(l *Local, n *Needed, peers []PeerRef) error {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return err
 	}
+	// Disk-space gate: the file must fit on the sync folder's own
+	// filesystem once in-flight reservations are subtracted (the
+	// staging tmp file lives inside it — same filesystem, atomic
+	// rename). Released on every exit path; a re-pull of the same
+	// rel re-declares and replaces.
+	resID := "pull:" + n.Rel
+	if p.Space != nil {
+		if err := p.Space.Reserve(l.Dir, resID, f0.Size); err != nil {
+			var nse *diskspace.NoSpaceError
+			if errors.As(err, &nse) {
+				// The numbers (need/free/reserved/available)
+				// are in the error text — full detail stays
+				// debug-only; the dashboard gets the error
+				// line via the runner's "pull failed" path.
+				logx.Debug("sync", "pull %s rejected: %v (dest %s)", n.Rel, err, l.Dir)
+			}
+			return err
+		}
+		defer p.Space.Release(l.Dir, resID)
+	}
 	// Temp file lives in the excluded metadata folder (hashes/tmp),
 	// never beside the target: a half-written pull must not show up in
 	// the sync folder where Scan would announce it to peers (the
@@ -888,6 +914,10 @@ func (p *Puller) Pull(l *Local, n *Needed, peers []PeerRef) error {
 		if _, err := f.WriteAt(bytes, int64(c)*int64(man.ChunkSize)); err != nil {
 			_ = os.Remove(part)
 			return err
+		}
+		if p.Space != nil {
+			// On disk now — out of the reservation.
+			p.Space.Written(l.Dir, resID, int64(len(bytes)))
 		}
 	}
 	if err := f.Sync(); err != nil {

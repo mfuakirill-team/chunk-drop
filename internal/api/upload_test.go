@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"chunkdrop/internal/activity"
+	"chunkdrop/internal/diskspace"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/transfer"
 	"chunkdrop/internal/upload"
@@ -203,3 +205,44 @@ func TestUploadClose(t *testing.T) {
 		t.Errorf("staging dir survived close: %v", err)
 	}
 }
+
+// A batch that does not fit the destination filesystem is refused at
+// start with a clear 400 (the phone sees the numbers), and the
+// dashboard's activity feed gets the error line too.
+func TestUploadStartNoSpace(t *testing.T) {
+	srv, _ := newUploadTestServer(t)
+	srv.Activity = activity.NewLog(10)
+	h := srv.Handler()
+	_, key := newSlot(t, h)
+
+	// Fake ledger: every reserve overflows ("the FS is full").
+	srv.Uploads.Space = fakeNoSpaceLedger{}
+	manifest := `{"files":[{"path":"pics/p1.jpg","size":100,"chunkCount":1,"hashes":["` + strings.Repeat("ab", 32) + `"],"mtime":1700000000000}]}`
+	rec := reqKeyBody(t, h, http.MethodPost, "/api/upload/start", key, manifest)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("start with full disk = %d: %s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not enough disk space") {
+		t.Errorf("400 body lacks the disk-space message: %s", rec.Body.String())
+	}
+	// Dashboard report: one error line with the numbers + destination.
+	found := false
+	for _, e := range srv.Activity.List() {
+		if e.Kind == activity.KindError && strings.Contains(e.Msg, "phone upload rejected") &&
+			strings.Contains(e.Msg, "not enough disk space") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no dashboard error line for the refused upload")
+	}
+}
+
+// fakeNoSpaceLedger always refuses.
+type fakeNoSpaceLedger struct{}
+
+func (fakeNoSpaceLedger) Reserve(dir, id string, size int64) error {
+	return &diskspace.NoSpaceError{Need: size, Free: 10, Reserved: 0}
+}
+func (fakeNoSpaceLedger) Written(dir, id string, n int64) {}
+func (fakeNoSpaceLedger) Release(dir, id string)          {}
