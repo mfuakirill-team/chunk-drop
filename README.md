@@ -2,24 +2,40 @@
 
 **Chunked, resumable, torrent-style file transfer for a private group of people.**
 A small desktop program ("engine") sends files to any phone or PC through a browser
-("just scan the QR"), over the local network today and over the internet later.
+("just scan the QR") — and phones push files *into* the PC the same way — over the
+local network today and over the internet later.
 Optional USB-stick "sneakernet" mode for carrying chunks physically.
 
-> Status: **M0 built** — LAN one-shot send works end-to-end (engine + web app).
+> Status: **M0 + M1 built** — LAN transfers work end-to-end in both directions
+> (PC→phone and phone→PC) plus automatic PC↔PC sync-folder mesh.
 > Internet mode (VPS hub) is M2; see `docs/PLAN.md` §3 for the roadmap.
+
+## Supported
+
+| Engine (sender/receiver PC) | Browsers (phones + PCs) |
+|---|---|
+| Windows, Linux, macOS (single portable binary — no install) | any modern browser: Android Chrome, iPhone/iPad Safari, desktop Chrome/Firefox |
 
 ## Quick start (5 minutes)
 
-**What you need:** the sending machine runs the engine (Windows or Linux);
-every receiving device only needs a browser on the same network.
+**What you need:** the sending machine runs the engine (Windows, Linux, or
+macOS); every other device only needs a browser on the same network.
 
 ### 1. Get a binary
 
-Build it from this checkout (Go 1.27+ and Node 20.19+ once, for the web app):
+Download a ready binary from the
+[Releases page](../../releases) — raw files, no installer:
+
+- tagged releases (`v*`) are stable builds,
+- **dev-build** is the rolling prerelease of the latest `main` (includes
+  `SHA256SUMS` to verify).
+
+Or build it from this checkout (Go 1.27+ and Node 20.19+ once, for the web app):
 
 ```bash
 make engine-win       # → bin/engine-windows-amd64.exe
 make engine-linux     # → bin/engine-linux-amd64 + -arm64
+make engine-mac       # → bin/engine-darwin-arm64
 ```
 
 ### 2. Set the group key (once per machine)
@@ -53,13 +69,23 @@ It prints the dashboard URL (`http://<lan-ip>:8090/`):
 nothing is ever uploaded to a server. All options, browser differences,
 firewall/unboxing troubleshooting: **`docs/USAGE.md`**.
 
+### 4. The other direction: phone → PC (M1)
+
+On the dashboard, the **Receive from a phone** card opens a link (QR).
+The phone scans it, picks files, and pushes them **into** the PC — they
+land in the sync folder and propagate to your other engines automatically.
+One link is reusable for several batches ("Send more" on the phone);
+**Close link** kills the phone's key instantly. While a push is in
+flight, both screens show file names, so you can verify the right
+files are moving.
+
 Prefer running the engine in Docker (home server / NAS)? `deploy/`
 has a lightweight image + compose file — `docs/USAGE.md` §3.1.
 (The VPS gets the *hub* — relay + PWA host — in M2: `docs/DEPLOY-VPS.md`.)
 
 ## Why
 
-The group needs to move files between Windows/Linux PCs and Android/iOS phones:
+The group needs to move files between Windows/Linux/macOS PCs and Android/iOS phones:
 
 - one-shot transfers (receive a file, save it, done — nothing runs 24/7 on phones),
 - mixed content: sometimes one multi-GB file, sometimes hundreds of small ones,
@@ -77,7 +103,7 @@ LAN (primary, M0)                          Internet (M2)
 ─────────────────                          ─────────────
 ┌────────────────┐    QR code              ┌────────────────┐
 │ Engine (Go)    │────────────────┐        │ Engine (Go)    │
-│ Windows/Linux  │                │        │ Windows/Linux  │
+│ Win/Linux/mac  │                │        │ Win/Linux/mac  │
 │ single binary  │                ▼        └───────┬────────┘
 │                │      ┌──────────────┐          │ signaling only
 │ serves web UI  │◄─────│ Phone browser│          ▼ (bytes go P2P)
@@ -92,6 +118,9 @@ LAN (primary, M0)                          Internet (M2)
   a dropped WiFi moment doesn't restart a 4 GB transfer.
 - **Pairing = the QR code itself**: it contains a per-transfer secret that never
   appears on the wire.
+- **PC↔PC sync mesh**: a shared sync folder (`~/Downloads/chunk-drop-files`)
+  propagates between your engines automatically — including files pushed
+  from phones.
 - The VPS **never stores user files**; it only pairs endpoints and relays
   encrypted bytes when a direct P2P connection fails.
 - Later phases: multi-receiver swarms (receivers fetch missing chunks from each
@@ -107,6 +136,8 @@ LAN (primary, M0)                          Internet (M2)
 | `docs/SECURITY.md` | Threat model, auth model, sanitization rules, accepted risks |
 | `docs/DEPLOY-VPS.md` | VPS deployment: Docker (hub) + existing nginx, configs included |
 | `docs/M0-TASKS.md` | Concrete build checklist for the first milestone |
+| `docs/M1-TASKS.md` | Build checklist for phone→PC push + sync mesh (M1) |
+| `docs/DEVICE-TESTS.md` | Real-hardware acceptance script (the human pass) |
 | `docs/USAGE.md` | **Full usage guide** — troubleshooting, options, details behind every quick-start step |
 
 ## Ground rules (from the requirements discussion)
