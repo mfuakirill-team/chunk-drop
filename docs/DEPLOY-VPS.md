@@ -69,6 +69,10 @@ docker compose ps
 # 3. verify
 curl -s http://127.0.0.1:8085/healthz        # → ok
 docker compose logs hub | head               # → hub 0.1.0-m2.2 listening on :8080
+docker compose logs stun | head              # coturn banner + "Listening on port 3478" —
+                                             # NOT "Operation not permitted" (exit 126 =
+                                             # no-new-privileges vs the image's file-capped
+                                             # binary; see docker-compose.yml)
 curl -s https://drop.404.mn/healthz          # → ok (through nginx + TLS)
 ```
 
