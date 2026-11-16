@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -27,8 +28,10 @@ import (
 	"chunkdrop/internal/activity"
 	"chunkdrop/internal/api"
 	"chunkdrop/internal/config"
+	"chunkdrop/internal/device"
 	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/diskspace"
+	"chunkdrop/internal/hubclient"
 	"chunkdrop/internal/lanip"
 	"chunkdrop/internal/logx"
 	"chunkdrop/internal/picker"
@@ -142,6 +145,17 @@ func run(portFlag int, bindFlag string) error {
 		cfg.Port = config.DefaultPort
 	}
 
+	// Device identity (M2): a persistent Ed25519 key pair at
+	// <configDir>/device.key — the same machine keeps the same device
+	// ID across restarts, both on the LAN (discovery beacons) and at
+	// the hub. The key file never lives in the sync folder (it would
+	// replicate to every device). Failure only disables the internet
+	// mesh; the engine keeps running.
+	ident, identErr := device.LoadOrCreate(filepath.Dir(cfgPath), lanip.Hostname())
+	if identErr != nil {
+		log.Printf("device identity unavailable: %v (internet mesh off)", identErr)
+	}
+
 	if cfg.GroupKey == "" || strings.Contains(cfg.GroupKey, "<paste") {
 		log.Printf("NOTE: no group key configured yet — run `engine keygen` and")
 		log.Printf("      paste the output into %s", cfgPath)
@@ -201,9 +215,30 @@ func run(portFlag int, bindFlag string) error {
 
 	// LAN discovery (#5/#7): UDP broadcast beacons authenticated by
 	// an HMAC of the group key; inactive when no key is configured.
-	disc := discService(cfg, lanip.Hostname(), cfg.Port)
+	// Beacons carry the persistent device ID (M2): same machine = same
+	// identity on the LAN and at the hub.
+	deviceID := ""
+	if ident != nil {
+		deviceID = ident.ID
+	}
+	disc := discService(cfg, deviceID, lanip.Hostname(), cfg.Port)
 	srv.Discovery = disc
 	handler := srv.Handler()
+
+	// Hub connection (M2 step ①): online presence of the internet
+	// mesh. Optional (hub_url empty = off); LAN behavior is unchanged.
+	// The client reconnects forever on its own with backoff.
+	var hubStop func()
+	if cfg.HubURL != "" && ident != nil && deviceID != "" && cfg.GroupKey != "" {
+		hc := hubclient.New(cfg.HubURL, cfg.GroupKey, ident, logx.Adapter(logx.LevelInfo, "hub"))
+		hc.Start()
+		srv.Hub = hc
+		hubStop = hc.Stop
+		log.Printf("hub: %s — internet mesh on", cfg.HubURL)
+	} else if cfg.HubURL != "" {
+		log.Printf("hub: %s configured but unavailable (%s) — internet mesh off",
+			cfg.HubURL, hubDisableReason(identErr, cfg.GroupKey))
+	}
 
 	// Shared-folder auto-transfer (#6): only when a key is configured
 	// (the mesh is group-key gated — syncmesh never trusts strangers).
@@ -356,14 +391,30 @@ func run(portFlag int, bindFlag string) error {
 	close(reapStop)
 	close(syncStop)
 	disc.Close()
+	if hubStop != nil {
+		hubStop()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
 	return nil
 }
 
+// itoa pads/reports the port for URL building.
 func itoa(p int) string {
 	return fmt.Sprintf("%d", p)
+}
+
+// hubDisableReason explains why the internet mesh is off (log line).
+func hubDisableReason(identErr error, groupKey string) string {
+	switch {
+	case identErr != nil:
+		return "no device identity"
+	case groupKey == "":
+		return "no group key"
+	default:
+		return "unknown"
+	}
 }
 
 // openBrowser opens the dashboard in the default browser (#4).
@@ -395,16 +446,35 @@ type pickerAdapters struct{}
 func (pickerAdapters) PickFiles() ([]string, error)  { return picker.Files() }
 func (pickerAdapters) PickFolder() ([]string, error) { return picker.Folder() }
 
-// discService builds the discovery service (#5/#7); nil-safe when the
-// group key is unset (a keyless engine is a plain QR sender).
-func discService(cfg config.Config, name string, port int) *discovery.Service {
+// discService builds the discovery service (#5/#7). The fallback for
+// a keyless engine or a failed UDP bind is a real, initialized,
+// inactive service (NewService with an empty key) — NOT a zero value:
+// the syncmesh goroutine calls Self/Table unconditionally, and a
+// zero-value Service would nil-panic there (two engines on one
+// machine is the normal second-instance case: the second bind fails).
+// The device ID comes from the persistent identity — an empty
+// fallback ID keeps the keyless case harmless (nothing joins the
+// mesh).
+func discService(cfg config.Config, id, name string, port int) *discovery.Service {
 	if cfg.GroupKey == "" || strings.Contains(cfg.GroupKey, "<paste") {
-		return &discovery.Service{} // inactive: Run just waits
+		return inactiveDisc(id, name, port)
 	}
-	s, err := discovery.NewService(cfg.GroupKey, name, port)
+	s, err := discovery.NewService(cfg.GroupKey, id, name, port)
 	if err != nil {
 		log.Printf("discovery unavailable: %v (sync + peers panel off)", err)
-		return &discovery.Service{}
+		return inactiveDisc(id, name, port)
+	}
+	return s
+}
+
+// inactiveDisc builds the safe no-op service (no socket bound, empty
+// peer table). NewService with an empty group key never fails: it
+// returns before touching the network.
+func inactiveDisc(id, name string, port int) *discovery.Service {
+	s, err := discovery.NewService("", id, name, port)
+	if err != nil {
+		// Unreachable (empty key returns early), but never nil-deref.
+		return nil
 	}
 	return s
 }

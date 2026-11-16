@@ -11,6 +11,7 @@ import (
 
 	"chunkdrop/internal/activity"
 	"chunkdrop/internal/discovery"
+	"chunkdrop/internal/hubclient"
 	"chunkdrop/internal/logx"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
@@ -71,6 +72,10 @@ type Server struct {
 	// (#1.3): uploads (serving), downloads (sync), deletes, errors.
 	// Nil = events are dropped (callers need no guards).
 	Activity *activity.Log
+
+	// Hub is the M2 hub connection (internet mesh presence); nil =
+	// no hub configured (hub_url empty) and /api/hub says so.
+	Hub *hubclient.Client
 
 	// AllowRemoteDashboard disables the local-only guard on the
 	// dashboard/control routes (engine.toml: allow_remote_dashboard).
@@ -142,6 +147,7 @@ func (s *Server) Handler() http.Handler {
 	// name local files and peers. Sync endpoints (#6) stay reachable by
 	// peer engines (that is the mesh; group key is the gate).
 	mux.Handle("GET /api/peers", s.localOnly(s.authStart(s.handlePeers)))
+	mux.Handle("GET /api/hub", s.localOnly(s.authStart(s.handleHub)))
 	mux.Handle("GET /api/activity", s.localOnly(s.authStart(s.handleActivity)))
 	mux.HandleFunc("GET /api/sync/state", s.authStart(s.handleSyncState))
 	mux.HandleFunc("POST /api/sync/start", s.authStart(s.handleSyncStart))

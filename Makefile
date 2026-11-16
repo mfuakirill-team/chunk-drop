@@ -12,9 +12,9 @@ NODE ?= npm
 LDFLAGS := -s -w
 BUILDFLAGS := -trimpath -buildvcs=false -ldflags="$(LDFLAGS)"
 
-.PHONY: all web engine engine-win engine-linux engine-mac test clean help
+.PHONY: all web engine hub engine-win engine-linux engine-mac test clean help
 
-all: engine
+all: engine hub
 
 ## web: build the Preact app into web/dist and sync for go:embed
 web:
@@ -29,6 +29,10 @@ web:
 ## engine: build the engine binary for the current platform
 engine: web
 	$(GO) build $(BUILDFLAGS) -o bin/engine ./cmd/engine
+
+## hub: build the coordination server (M2, VPS/Docker)
+hub:
+	$(GO) build $(BUILDFLAGS) -o bin/hub ./cmd/hub
 
 ## engine-win: cross-compile Windows amd64 (the group's daily driver)
 engine-win: web

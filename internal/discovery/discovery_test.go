@@ -74,12 +74,12 @@ func TestMemberByID(t *testing.T) {
 // does not need a second machine).
 func TestServiceLoopback(t *testing.T) {
 	key := "test-key-test-key-test-key-test!!"
-	s1, err := NewService(key, "one", 18091)
+	s1, err := NewService(key, "id-one-id-one-id-one-id-one-id", "one", 18091)
 	if err != nil {
 		t.Skipf("cannot bind discovery port: %v", err)
 	}
 	defer s1.Close()
-	s2, err := NewService(key, "two", 18092)
+	s2, err := NewService(key, "id-two-id-two-id-two-id-two-id", "two", 18092)
 	if err != nil {
 		t.Skipf("cannot bind second port: %v", err)
 	}

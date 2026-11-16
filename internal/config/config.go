@@ -54,6 +54,12 @@ type Config struct {
 	// default: the dashboard controls this PC, so only this machine may
 	// use it; receiving links always work from other devices.
 	AllowRemoteDashboard bool `toml:"allow_remote_dashboard"`
+
+	// HubURL is the M2 hub's websocket endpoint, e.g.
+	// "wss://drop.404.mn/hub/ws". Empty = the internet mesh is off:
+	// the engine behaves exactly as in M0/M1 (LAN only). The hub is
+	// optional infrastructure; LAN keeps working without it.
+	HubURL string `toml:"hub_url"`
 }
 
 // Default returns the built-in defaults (used when no config file exists —

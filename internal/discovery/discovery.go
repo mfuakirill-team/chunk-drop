@@ -157,14 +157,16 @@ type Service struct {
 }
 
 // NewService builds the discovery service bound to :BroadcastPort.
-// groupKey empty → service inactive (Verify always fails, nothing
-// joins the mesh, beacons are not sent — a keyless engine is a plain
-// QR sender).
-func NewService(groupKey string, name string, httpPort int) (*Service, error) {
+// id is the device ID (persistent, from internal/device) — beacons
+// carry it so a machine keeps its identity across restarts and the
+// same ID matches at the hub (M2). groupKey empty → service inactive
+// (Verify always fails, nothing joins the mesh, beacons are not sent
+// — a keyless engine is a plain QR sender).
+func NewService(groupKey string, id, name string, httpPort int) (*Service, error) {
 	s := &Service{
 		auth:   NewAuthenticator(groupKey),
 		table:  &Table{},
-		self:   Beacon{V: 1, ID: NewID(), Name: name, Port: httpPort},
+		self:   Beacon{V: 1, ID: id, Name: name, Port: httpPort},
 		stop:   make(chan struct{}),
 		debugf: func(string, ...any) {},
 	}
@@ -190,7 +192,15 @@ func (s *Service) SetDebugf(fn func(string, ...any)) {
 func (s *Service) Self() Beacon { return s.self }
 
 // Table exposes the member table (read side).
-func (s *Service) Table() *Table { return s.table }
+func (s *Service) Table() *Table {
+	// Zero-value/inactive services (failed UDP bind, keyless engine)
+	// have no table — hand back an empty one so callers (syncmesh
+	// scans, the peers panel) never nil-panic.
+	if s == nil || s.table == nil {
+		return &Table{}
+	}
+	return s.table
+}
 
 // HTTPAddrs returns live members as host:port endpoints for the
 // syncmesh runner (self excluded — never pull from ourselves).
