@@ -52,12 +52,26 @@ type Server struct {
 	Logf func(format string, args ...any)
 
 	mu      sync.Mutex
-	clients map[string]map[string]*conn // group tag → device ID → conn
+	clients map[string]*group // group tag → group
+}
+
+// group is one group tag's live connections plus that group's
+// broadcast lock. The lock serializes presence broadcasts so the wire
+// order on every member's connection matches the event order (join,
+// leave, replace): two handler goroutines broadcasting concurrently
+// would otherwise only race a connection's write mutex — the newer
+// list could land BEFORE the older one, and the client's "last frame
+// wins" rule would keep the stale list forever (seen as a flaky CI
+// failure in TestSendSignalAndDispatch: a device stuck on a 1-device
+// presence list that arrived after the 2-device one).
+type group struct {
+	bmu   sync.Mutex
+	conns map[string]*conn
 }
 
 // New builds an empty hub.
 func New() *Server {
-	return &Server{clients: map[string]map[string]*conn{}}
+	return &Server{clients: map[string]*group{}}
 }
 
 // Close drops every live connection (SIGTERM shutdown, and the
@@ -67,11 +81,11 @@ func (s *Server) Close() {
 	s.mu.Lock()
 	var all []*conn
 	for _, g := range s.clients {
-		for _, c := range g {
+		for _, c := range g.conns {
 			all = append(all, c)
 		}
 	}
-	s.clients = map[string]map[string]*conn{}
+	s.clients = map[string]*group{}
 	s.mu.Unlock()
 	for _, c := range all {
 		_ = c.ws.CloseNow()
@@ -181,6 +195,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		typ, data, err := ws.Read(r.Context())
 		if err != nil {
+			s.logf("leave: %s (%s) read error: %v", c.id, c.name, err)
 			s.leave(c)
 			return
 		}
@@ -293,7 +308,7 @@ func (s *Server) relay(c *conn, data []byte, typ string) {
 	g := s.clients[c.tag]
 	var target *conn
 	if g != nil {
-		target = g[sig.To]
+		target = g.conns[sig.To]
 	}
 	s.mu.Unlock()
 
@@ -321,27 +336,30 @@ func (s *Server) join(c *conn) {
 	s.mu.Lock()
 	g := s.clients[c.tag]
 	if g == nil {
-		g = map[string]*conn{}
+		g = &group{conns: map[string]*conn{}}
 		s.clients[c.tag] = g
 	}
-	if old, ok := g[c.id]; ok && old != c {
+	if old, ok := g.conns[c.id]; ok && old != c {
 		old.replaced = true
 		// CloseNow, not Close: a graceful close waits up to 5 s for
 		// the old client's echo, and that client is gone (it is the
 		// one redialing as c). Under the hub lock that stall would
 		// freeze every join in the group.
 		_ = old.ws.CloseNow()
-	} else if len(g) >= MaxDevicesPerGroup {
+	} else if len(g.conns) >= MaxDevicesPerGroup {
 		s.mu.Unlock()
 		s.reject(c.ws, "device limit reached for this group")
 		return
 	}
-	g[c.id] = c
+	g.conns[c.id] = c
 	// Copy targets + peers under the lock: the map must never be
 	// iterated after unlock (a concurrent join/leave would mutate it).
 	peers, targets := view(g)
 	s.mu.Unlock()
+	// Serialize against the group's other broadcasts: see group.bmu.
+	g.bmu.Lock()
 	broadcast(targets, peers)
+	g.bmu.Unlock()
 }
 
 // leave removes the device (if it still owns the slot) and
@@ -354,24 +372,32 @@ func (s *Server) leave(c *conn) {
 		return
 	}
 	g := s.clients[c.tag]
-	if g == nil || g[c.id] != c {
+	if g == nil || g.conns[c.id] != c {
 		s.mu.Unlock()
 		return
 	}
-	delete(g, c.id)
-	if len(g) == 0 {
+	delete(g.conns, c.id)
+	if len(g.conns) == 0 {
 		delete(s.clients, c.tag)
 	}
 	peers, targets := view(g)
 	s.mu.Unlock()
+	// Serialize against the group's other broadcasts: see group.bmu.
+	// (The group may already be deleted from s.clients; the lock is
+	// still ours to hold — a re-created group would be newer state
+	// anyway, and its join broadcast serializes behind this one only
+	// if it grabbed this same lock object, which it does whenever the
+	// two events overlap on the same connection set.)
+	g.bmu.Lock()
 	broadcast(targets, peers)
+	g.bmu.Unlock()
 }
 
 // view copies a group's peers and their connections under the lock.
-func view(g map[string]*conn) ([]Peer, []*conn) {
-	peers := make([]Peer, 0, len(g))
-	targets := make([]*conn, 0, len(g))
-	for _, c := range g {
+func view(g *group) ([]Peer, []*conn) {
+	peers := make([]Peer, 0, len(g.conns))
+	targets := make([]*conn, 0, len(g.conns))
+	for _, c := range g.conns {
 		if c.replaced {
 			continue
 		}
