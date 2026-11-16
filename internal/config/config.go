@@ -60,6 +60,11 @@ type Config struct {
 	// the engine behaves exactly as in M0/M1 (LAN only). The hub is
 	// optional infrastructure; LAN keeps working without it.
 	HubURL string `toml:"hub_url"`
+
+	// StunURL is the STUN server (e.g. "stun:drop.404.mn:3478") used
+	// for WebRTC server-reflexive candidates when punching through
+	// NATs. Empty is fine on a plain LAN (host candidates suffice).
+	StunURL string `toml:"stun_url"`
 }
 
 // Default returns the built-in defaults (used when no config file exists —

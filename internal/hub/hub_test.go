@@ -100,15 +100,21 @@ func dialExpectReject(t *testing.T, url string, mutate func(*Hello)) string {
 }
 
 // expectPresence reads frames until one presence frame matches want
-// exactly (skipping pings/other frames).
+// exactly (skipping pings/other frames). Order-insensitive: view()
+// iterates a map, so the protocol makes no ordering promise.
 func expectPresence(t *testing.T, ws *websocket.Conn, want ...string) {
 	t.Helper()
+	wantSet := map[string]bool{}
+	for _, id := range want {
+		wantSet[id] = true
+	}
+	start := time.Now()
 	for i := 0; i < 20; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		typ, data, err := ws.Read(ctx)
 		cancel()
 		if err != nil {
-			t.Fatalf("presence read: %v", err)
+			t.Fatalf("presence read (after %s): %v", time.Since(start), err)
 		}
 		if typ != websocket.MessageText {
 			continue
@@ -121,8 +127,8 @@ func expectPresence(t *testing.T, ws *websocket.Conn, want ...string) {
 			continue
 		}
 		match := true
-		for i := range want {
-			if p.Devices[i].ID != want[i] {
+		for _, d := range p.Devices {
+			if !wantSet[d.ID] {
 				match = false
 				break
 			}
@@ -167,6 +173,138 @@ func TestHelloAndPresence(t *testing.T) {
 	// proves d3 (the other group) never leaked into d1's feed.
 	ws2.Close(websocket.StatusAbnormalClosure, "gone")
 	expectPresence(t, ws1, d1.id)
+}
+
+// expectSignal reads frames until one matches (type, from, side),
+// skipping other frames; returns the raw body.
+func expectSignal(t *testing.T, ws *websocket.Conn, typ, from, side string) Signal {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		frametyp, data, err := ws.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("signal read: %v", err)
+		}
+		if frametyp != websocket.MessageText {
+			continue
+		}
+		var s Signal
+		if json.Unmarshal(data, &s) != nil || s.Type != typ {
+			continue
+		}
+		if s.From != from || s.Side != side {
+			t.Fatalf("signal = from %q side %q, want %q %q", s.From, s.Side, from, side)
+		}
+		return s
+	}
+	t.Fatalf("never saw a %s frame from %s", typ, from)
+	return Signal{}
+}
+
+// TestSignalRelay: signaling flows between same-group devices with
+// the hub-authoritative From, and is invisible across groups.
+func TestSignalRelay(t *testing.T) {
+	h := New()
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+	url := hubURL(t, srv)
+
+	d1 := newTestDevice(t, "group-sig", "pc-one")
+	d2 := newTestDevice(t, "group-sig", "pc-two")
+	ws1 := d1.dial(t, url, nil)
+	defer ws1.Close(websocket.StatusNormalClosure, "")
+	expectPresence(t, ws1, d1.id)
+	ws2 := d2.dial(t, url, nil)
+	defer ws2.Close(websocket.StatusNormalClosure, "")
+	expectPresence(t, ws2, d1.id, d2.id)
+	expectPresence(t, ws1, d1.id, d2.id)
+
+	// d1 → d2: a sdp offer.
+	body, _ := json.Marshal(map[string]any{"type": "offer", "sdp": "v=0"})
+	frame, _ := json.Marshal(Signal{Type: "sdp", To: d2.id, Side: "offer", Body: body})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := ws1.Write(ctx, websocket.MessageText, frame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cancel()
+
+	sig := expectSignal(t, ws2, "sdp", d1.id, "offer")
+	if string(sig.Body) == "" || string(sig.Body) == "null" {
+		t.Fatal("empty relayed body")
+	}
+
+	// d2 → d1: the answer back.
+	body, _ = json.Marshal(map[string]any{"type": "answer", "sdp": "v=0"})
+	frame, _ = json.Marshal(Signal{Type: "sdp", To: d1.id, Side: "answer", Body: body})
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	if err := ws2.Write(ctx, websocket.MessageText, frame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cancel()
+	expectSignal(t, ws1, "sdp", d2.id, "answer")
+}
+
+// TestSignalSpoofAndOffline: From is overwritten by the hub, a bad
+// target id is dropped, and an offline target answers with an error
+// frame instead of silence.
+func TestSignalSpoofAndOffline(t *testing.T) {
+	h := New()
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+	url := hubURL(t, srv)
+
+	d1 := newTestDevice(t, "group-spoof", "pc-one")
+	d2 := newTestDevice(t, "group-spoof", "pc-two")
+	ws1 := d1.dial(t, url, nil)
+	defer ws1.Close(websocket.StatusNormalClosure, "")
+	expectPresence(t, ws1, d1.id)
+	ws2 := d2.dial(t, url, nil)
+	defer ws2.Close(websocket.StatusNormalClosure, "")
+	expectPresence(t, ws2, d1.id, d2.id)
+	expectPresence(t, ws1, d1.id, d2.id)
+
+	// Spoof: d1 claims the frame came from d2 — the hub rewrites From.
+	body, _ := json.Marshal(map[string]any{"sdp": "x"})
+	frame, _ := json.Marshal(Signal{Type: "sdp", To: d2.id, From: "fake", Side: "offer", Body: body})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := ws1.Write(ctx, websocket.MessageText, frame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cancel()
+	expectSignal(t, ws2, "sdp", d1.id, "offer") // From = real sender
+
+	// Offline target: error frame back to the sender.
+	frame, _ = json.Marshal(Signal{Type: "sdp", To: strings.Repeat("a", 64), Side: "offer", Body: body})
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	if err := ws1.Write(ctx, websocket.MessageText, frame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cancel()
+	var gotErr Error
+	found := false
+	for i := 0; i < 20 && !found; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		typ, data, err := ws1.Read(ctx)
+		cancel()
+		if err != nil {
+			break
+		}
+		if typ == websocket.MessageText && json.Unmarshal(data, &gotErr) == nil && gotErr.Type == "error" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no error frame for offline signaling target")
+	}
+
+	// Bad target shape: dropped silently (no crash, connection stays).
+	frame, _ = json.Marshal(Signal{Type: "sdp", To: "zz", Side: "offer", Body: body})
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	if err := ws1.Write(ctx, websocket.MessageText, frame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cancel()
 }
 
 func TestHelloRejections(t *testing.T) {

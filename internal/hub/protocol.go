@@ -19,6 +19,8 @@ package hub
 // independently deployable (old hub, newer engine: presence and
 // hello are frozen; signaling/relay types below are additive).
 
+import "encoding/json"
+
 // Hello is the first message a client sends after upgrading.
 type Hello struct {
 	Type string `json:"type"` // "hello"
@@ -49,6 +51,22 @@ type Peer struct {
 type Presence struct {
 	Type    string `json:"type"` // "presence"
 	Devices []Peer `json:"devices"`
+}
+
+// Signal relays WebRTC signaling between two members of the same
+// group (M2 step ②). Body is opaque pion JSON (SessionDescription or
+// ICECandidateInit) — the hub never parses it. To is the target
+// device ID (client→hub); From is overwritten by the hub with the
+// authenticated sender, so a client cannot spoof another device.
+// Side tags which PC the payload belongs to: "offer" = the sender's
+// own PC, "answer" = the PC the sender is answering on. The receiver
+// maps "offer"→its answer-side PC, "answer"→its offer-side PC.
+type Signal struct {
+	Type string          `json:"type"`           // "sdp" | "ice"
+	To   string          `json:"to"`             // client→hub: target device ID
+	From string          `json:"from,omitempty"` // hub→client: authenticated sender
+	Side string          `json:"side"`           // "offer" | "answer"
+	Body json.RawMessage `json:"body"`           // pion SDP/ICE JSON, opaque
 }
 
 // Error is sent before the hub closes a connection it rejects.

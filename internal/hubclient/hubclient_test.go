@@ -2,6 +2,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -131,6 +132,67 @@ func TestPresenceAcrossTwoClients(t *testing.T) {
 		devs := c2.Status().Devices
 		return len(devs) == 2
 	})
+}
+
+// TestSendSignalAndDispatch: SendSignal delivers through the hub to a
+// second client, and OnSignal fires with the hub-authoritative from
+// id and the exact side/body payload.
+func TestSendSignalAndDispatch(t *testing.T) {
+	url, srv, hub1 := testHub(t)
+	defer func() { hub1.Close(); srv.Close() }()
+
+	id1 := testIdentity(t, "engine-sig-a")
+	id2 := testIdentity(t, "engine-sig-b")
+
+	c1 := New(url, "group-key-delta", id1, t.Logf)
+	c2 := New(url, "group-key-delta", id2, t.Logf)
+
+	type sig struct {
+		from, typ, side string
+		body            string
+	}
+	var mu sync.Mutex
+	var got []sig
+	c2.OnSignal = func(from, typ, side string, body json.RawMessage) {
+		mu.Lock()
+		got = append(got, sig{from, typ, side, string(body)})
+		mu.Unlock()
+	}
+	c1.Start()
+	defer c1.Stop()
+	c2.Start()
+	defer c2.Stop()
+	waitFor(t, 3*time.Second, "c1 connected", c1.Connected)
+	waitFor(t, 3*time.Second, "both present", func() bool {
+		return len(c1.Status().Devices) == 2 && len(c2.Status().Devices) == 2
+	})
+
+	// c1 → c2 offer.
+	desc := map[string]any{"type": "offer", "sdp": "v=0\r\no=- 1 2 IN IP4 127.0.0.1"}
+	if err := c1.SendSignal(id2.ID, "offer", "sdp", desc); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitFor(t, 3*time.Second, "signal dispatched", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 1
+	})
+	mu.Lock()
+	s := got[0]
+	mu.Unlock()
+	if s.from != id1.ID || s.typ != "sdp" || s.side != "offer" {
+		t.Errorf("signal = %+v", s)
+	}
+	var back map[string]any
+	if err := json.Unmarshal([]byte(s.body), &back); err != nil || back["sdp"] != desc["sdp"] {
+		t.Errorf("body roundtrip: %v (%v)", s.body, err)
+	}
+
+	// Error path: signaling to an offline device returns an error
+	// frame (logged) and SendSignal itself still succeeds.
+	if err := c1.SendSignal(strings.Repeat("a", 64), "offer", "sdp", desc); err != nil {
+		t.Errorf("send to offline: %v", err)
+	}
 }
 
 // A group key the hub "doesn't know" is not a rejection — by design

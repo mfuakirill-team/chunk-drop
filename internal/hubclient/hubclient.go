@@ -60,6 +60,12 @@ type Client struct {
 	// OnPresence fires (outside locks) whenever the online-device
 	// list changes; nil = ignored.
 	OnPresence func([]Peer)
+	// OnSignal fires (on the read loop, in order) for each relayed
+	// signaling frame: from = authenticated sender device ID, typ =
+	// "sdp"/"ice", side = "offer"/"answer", body = opaque pion JSON.
+	// nil = dropped. Handlers must not block on signaling replies —
+	// the read loop serializes all inbound frames.
+	OnSignal func(from, typ, side string, body json.RawMessage)
 	// Logf renders a line; nil = silent (the caller wires logx).
 	Logf func(format string, args ...any)
 
@@ -186,11 +192,14 @@ func (c *Client) serve(ctx context.Context) error {
 	// without this, a dead-but-unclosed socket would linger and the
 	// hub's replace path would have to kill it for us.
 	defer ws.CloseNow()
-	ws.SetReadLimit(8 << 10) // same cap as the hub's
+	ws.SetReadLimit(hub.MaxReadLimit) // relayed SDPs carry gathered candidates
 
 	if err := c.hello(ws); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	c.conn = ws
+	c.mu.Unlock()
 	c.setConnected(true, nil)
 
 	// Keepalive: ping the hub on a timer; pong silence → close the
@@ -220,6 +229,11 @@ func (c *Client) serve(ctx context.Context) error {
 	// unblocks on both). No read deadline: control frames do not
 	// terminate Read, so a deadline would kill quiet-but-healthy
 	// presence connections every couple of minutes.
+	defer func() {
+		c.mu.Lock()
+		c.conn = nil
+		c.mu.Unlock()
+	}()
 	for {
 		typ, data, err := ws.Read(serveCtx)
 		if err != nil {
@@ -254,6 +268,33 @@ func (c *Client) hello(ws *websocket.Conn) error {
 	return err
 }
 
+// SendSignal sends one signaling frame to a device via the hub:
+// to = target device ID, side = "offer"/"answer" (which of the
+// sender's PCs the payload belongs to), typ = "sdp"/"ice", body =
+// opaque pion JSON. Safe from any goroutine; fails when the socket
+// is down (callers retry through their own state machines).
+func (c *Client) SendSignal(to, side, typ string, body any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("hub: signal body: %w", err)
+	}
+	frame, err := json.Marshal(hub.Signal{Type: typ, To: to, Side: side, Body: raw})
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	ws := c.conn
+	c.mu.Unlock()
+	if ws == nil {
+		return fmt.Errorf("hub: not connected")
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	wctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
+	defer cancel()
+	return ws.Write(wctx, websocket.MessageText, frame)
+}
+
 // handleFrame processes one server frame. Unknown types are ignored
 // (forward compatibility: newer hub + older engine).
 func (c *Client) handleFrame(data []byte) {
@@ -275,6 +316,15 @@ func (c *Client) handleFrame(data []byte) {
 		if c.OnPresence != nil {
 			c.OnPresence(p.Devices)
 		}
+	case "sdp", "ice":
+		if c.OnSignal == nil {
+			return
+		}
+		var s hub.Signal
+		if err := json.Unmarshal(data, &s); err != nil {
+			return
+		}
+		c.OnSignal(s.From, s.Type, s.Side, s.Body)
 	case "error":
 		var e hub.Error
 		if err := json.Unmarshal(data, &e); err == nil {

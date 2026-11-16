@@ -736,6 +736,19 @@ type PeerRef struct {
 	Host     string // host:port
 	EngineID string
 	Name     string
+	// Client overrides the default LAN http.Client for this peer.
+	// Tunnel peers (internet mesh) set it to their per-peer tunnel
+	// client, whose dialer opens WebRTC DataChannels instead of TCP.
+	// nil = normal LAN HTTP.
+	Client *http.Client
+}
+
+// clientFor picks the transport for one peer request.
+func (p *Puller) clientFor(peer PeerRef) *http.Client {
+	if peer.Client != nil {
+		return peer.Client
+	}
+	return httpClient()
 }
 
 // Puller fetches files from the swarm.
@@ -776,7 +789,7 @@ func (p *Puller) do(peer PeerRef, method, path string, body, out any) error {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := httpClient().Do(req)
+	resp, err := p.clientFor(peer).Do(req)
 	if err != nil {
 		return err
 	}
@@ -958,7 +971,7 @@ func (p *Puller) chunk(peer PeerRef, key string, f, c int) ([]byte, string, erro
 		return nil, "", err
 	}
 	req.Header.Set("X-ChunkDrop-Key", key)
-	resp, err := httpClient().Do(req)
+	resp, err := p.clientFor(peer).Do(req)
 	if err != nil {
 		return nil, "", err
 	}

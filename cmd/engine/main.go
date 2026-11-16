@@ -37,6 +37,7 @@ import (
 	"chunkdrop/internal/picker"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
+	"chunkdrop/internal/tunnel"
 	"chunkdrop/internal/upload"
 	"chunkdrop/internal/webui"
 )
@@ -229,11 +230,30 @@ func run(portFlag int, bindFlag string) error {
 	// mesh. Optional (hub_url empty = off); LAN behavior is unchanged.
 	// The client reconnects forever on its own with backoff.
 	var hubStop func()
+	// tunnelMgr is the M2 step ② WebRTC tunnel: DataChannels carrying
+	// the mesh HTTP protocol to hub peers. nil without a hub.
+	var tunnelMgr *tunnel.Manager
+	var hubClient *hubclient.Client
 	if cfg.HubURL != "" && ident != nil && deviceID != "" && cfg.GroupKey != "" {
-		hc := hubclient.New(cfg.HubURL, cfg.GroupKey, ident, logx.Adapter(logx.LevelInfo, "hub"))
-		hc.Start()
-		srv.Hub = hc
-		hubStop = hc.Stop
+		hubClient = hubclient.New(cfg.HubURL, cfg.GroupKey, ident, logx.Adapter(logx.LevelInfo, "hub"))
+		tunnelMgr = tunnel.New(deviceID, cfg.StunURL, hubClient.SendSignal)
+		tunnelMgr.Logf = logx.Adapter(logx.LevelInfo, "tunnel")
+		hubClient.OnSignal = tunnelMgr.SignalIn
+		hubClient.Start()
+		// The tunnel's listener serves the same mesh handler a LAN
+		// peer would hit: identical requests, different transport.
+		tunnelSrv := &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: 15 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+		}
+		go tunnelSrv.Serve(tunnelMgr.Listener())
+		srv.Hub = hubClient
+		hubStop = func() {
+			_ = tunnelSrv.Close()
+			tunnelMgr.Close()
+			hubClient.Stop()
+		}
 		log.Printf("hub: %s — internet mesh on", cfg.HubURL)
 	} else if cfg.HubURL != "" {
 		log.Printf("hub: %s configured but unavailable (%s) — internet mesh off",
@@ -262,15 +282,36 @@ func run(portFlag int, bindFlag string) error {
 					GroupKey: cfg.GroupKey,
 					Peers: func() []syncmesh.PeerRef {
 						var out []syncmesh.PeerRef
+						lanSeen := map[string]bool{}
 						for _, m := range disc.Table().List() {
 							if m.ID == disc.Self().ID {
 								continue
 							}
+							lanSeen[m.ID] = true
 							out = append(out, syncmesh.PeerRef{
 								Host:     net.JoinHostPort(m.IP, fmt.Sprintf("%d", m.Port)),
 								EngineID: m.ID,
 								Name:     m.Name,
 							})
+						}
+						// Internet mesh (M2 step ②): hub devices join
+						// the peer list over the WebRTC tunnel unless
+						// they are already visible on the LAN (the
+						// local route always wins — step ④ adds
+						// proper probing and per-peer toggles).
+						if tunnelMgr != nil && hubClient != nil {
+							selfID := disc.Self().ID
+							for _, d := range hubClient.Status().Devices {
+								if d.ID == selfID || d.ID == deviceID || lanSeen[d.ID] {
+									continue
+								}
+								out = append(out, syncmesh.PeerRef{
+									Host:     tunnel.HostFor(d.ID),
+									EngineID: d.ID,
+									Name:     d.Name,
+									Client:   tunnelMgr.HTTPClient(d.ID),
+								})
+							}
 						}
 						return out
 					},

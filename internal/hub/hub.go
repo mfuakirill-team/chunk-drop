@@ -25,8 +25,9 @@ const (
 	// MaxDevicesPerGroup caps presence per group tag (a family mesh:
 	// far below this; anything bigger is abuse or a bug).
 	MaxDevicesPerGroup = 64
-	// MaxReadLimit caps one inbound frame (hello/signaling are tiny).
-	MaxReadLimit = 8 << 10
+	// MaxReadLimit caps one inbound frame. Hellos are tiny; SDP
+	// descriptions with gathered candidates can reach a few KiB.
+	MaxReadLimit = 64 << 10
 	// TSWindow is how far a hello's timestamp may drift — presence
 	// replay is harmless (the same device re-announcing itself), so
 	// the window only needs to cover clock skew between machines.
@@ -92,10 +93,23 @@ type conn struct {
 	id   string
 	name string
 	pub  string
+	// wmu serializes writes: presence broadcasts, signaling relays and
+	// pings all write from different goroutines, and websocket
+	// connections allow only one concurrent writer.
+	wmu sync.Mutex
 	// replaced is set when a newer connection takes this device's
 	// presence slot: the loser stops broadcasting and lets its read
 	// loop wind down silently.
 	replaced bool
+}
+
+// write sends one text frame, serialized per connection.
+func (c *conn) write(data []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.ws.Write(ctx, websocket.MessageText, data)
 }
 
 // Handler returns the hub's HTTP tree: /hub/ws (upgrade) + /healthz.
@@ -240,9 +254,10 @@ func validateHello(h *Hello) error {
 	return nil
 }
 
-// handleFrame dispatches one client frame. Step ① knows presence
-// only; signaling (sdp/ice) and relay control arrive in later steps —
-// unknown frames are dropped, never fatal.
+// handleFrame dispatches one client frame. Presence needs no client
+// input; "sdp"/"ice" are WebRTC signaling (M2 step ②) relayed inside
+// the sender's group; unknown types are dropped, never fatal (forward
+// compatibility: older hub + newer engine).
 func (s *Server) handleFrame(c *conn, data []byte) {
 	var m struct {
 		Type string `json:"type"`
@@ -250,7 +265,51 @@ func (s *Server) handleFrame(c *conn, data []byte) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return
 	}
-	s.logf("frame %q from %s: not handled yet", m.Type, c.id)
+	switch m.Type {
+	case "sdp", "ice":
+		s.relay(c, data, m.Type)
+	default:
+		s.logf("frame %q from %s: not handled yet", m.Type, c.id)
+	}
+}
+
+// relay forwards one signaling frame to its target device inside the
+// sender's group. The hub overwrites From with the authenticated
+// sender — a client cannot spoof another device — and answers with an
+// error frame when the target is offline (the sender's dialer also
+// times out; the frame just fails fast).
+func (s *Server) relay(c *conn, data []byte, typ string) {
+	var sig Signal
+	if err := json.Unmarshal(data, &sig); err != nil {
+		return
+	}
+	// Shape checks only: the body stays opaque (pion JSON, capped by
+	// the frame limit).
+	if len(sig.To) != 64 || !isHex(sig.To) {
+		s.logf("relay: %s from %s: bad target", typ, c.id)
+		return
+	}
+	s.mu.Lock()
+	g := s.clients[c.tag]
+	var target *conn
+	if g != nil {
+		target = g[sig.To]
+	}
+	s.mu.Unlock()
+
+	if target == nil || target == c {
+		errData, _ := json.Marshal(Error{Type: "error", Error: "signaling target offline"})
+		_ = c.write(errData)
+		return
+	}
+	// Rebuild the frame instead of passing the client's bytes through:
+	// From is authoritative (hub-verified), never client-claimed.
+	fwd, err := json.Marshal(Signal{Type: typ, From: c.id, Side: sig.Side, Body: sig.Body})
+	if err != nil {
+		return
+	}
+	_ = target.write(fwd)
+	s.logf("relay: %s %s→%s", typ, c.id, sig.To)
 }
 
 // join inserts/updates the device and broadcasts the new presence to
@@ -331,10 +390,7 @@ func broadcast(targets []*conn, peers []Peer) {
 	}
 	data, _ := json.Marshal(Presence{Type: "presence", Devices: peers})
 	for _, c := range targets {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := c.ws.Write(ctx, websocket.MessageText, data)
-		cancel()
-		_ = err
+		_ = c.write(data)
 	}
 }
 
