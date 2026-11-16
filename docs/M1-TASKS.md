@@ -110,7 +110,7 @@ PCs through the existing sync mesh.
 - [x] Photos landed with "created now": finish stamps the phone's
       mtime (verified) and additionally the **creation time on
       Windows** (`internal/upload/stamps_windows.go`); Linux/macOS
-      birth time is not settable — documented in §5.12.
+      birth time is not settable — documented in §5.11.
 - [x] "Close link" left the key working: engine-side close already
       killed the slot instantly (verified: chunk/finish/start → 401
       right after close) — the dashboard card's auto-renew could

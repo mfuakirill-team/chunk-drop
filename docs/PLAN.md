@@ -76,7 +76,7 @@ M0 and M1 need **no server at all** — the engine serves the web page itself.
       (`mfuakirill-team/chunk-drop`) — free Releases + Actions CI.
 - [x] License: GPL-3 (the FSF text in `LICENSE`, as-is; no "or later"
       clause — SPDX GPL-3.0-only).
-- [ ] Subdomain on the existing domain, e.g. `xfer.example.com` (needed only at M2).
+- [x] Subdomain on the existing domain: `drop.404.mn` (M2 hub, `DEPLOY-VPS.md`).
 - [x] Engine config format: TOML (implemented, `internal/config`).
 
 ## 7. Next action

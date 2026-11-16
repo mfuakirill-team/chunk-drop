@@ -233,30 +233,59 @@ Normative details:
 - The `/u/` page is a public mount like `/r/` and never offers a
   dashboard-back affordance.
 
-## 5. Chunk framing off-HTTP (M2 internet mode — provisional)
+## 5. Internet mode (M2 — hub signaling + tunneled mesh)
 
-The same logical operations, framed as binary messages on a WebRTC
-DataChannel (ordered/reliable initially) or on the WSS relay:
+The provisional M2 design (rooms with codes, custom binary framing on
+DataChannels) was replaced during implementation by a simpler, strictly
+better scheme: the hub is a **signaling + presence server only**, and
+the transfer itself is the **existing HTTP mesh protocol tunneled
+unchanged** through WebRTC DataChannels — no second wire format to
+maintain, one code path for LAN and internet.
 
-```
-frame = [1-byte type][4-byte LE fileIndex][4-byte LE chunkIndex]
-        [4-byte LE length][length bytes payload]
+### Hub wire protocol (JSON frames over WSS, normative)
 
-type 0x01 = MANIFEST (payload = gzip JSON)
-type 0x02 = CHUNK (payload = raw bytes)
-type 0x03 = PROGRESS (payload = compact bitmap)
-type 0x04 = DONE / CANCEL
-```
+Endpoint: the engine config's `hub_url` (e.g. `wss://drop.404.mn/hub/ws`).
+Frames (`internal/hub/protocol.go`, shared with the client by import —
+old hub / newer engine must stay compatible: `hello`/`presence` frozen,
+the rest additive):
 
-Room lifecycle via hub signaling (WSS, JSON messages: `hello`, `sdp`, `ice`,
-`bye`): sender engine creates a room with the group key, gets code + room
-secret, shows `https://xfer.example.com/#c=<code>&s=<secret>` as QR or text.
-Receiver joins, SDP/ICE exchange, DataChannel opens.
+- `hello` (client→hub, first frame): `tag` = hex(SHA-256(group_key)),
+  `id` = device ID, `name`, `pub` (base64 Ed25519), `ts`, `sig` =
+  signature over `"chunkdrop-hello|tag|id|pub|ts"`. The group key
+  itself never crosses the wire; a wrong tag/signature is rejected
+  before the connection is used.
+- `presence` (hub→client, full list on every join/leave + after hello):
+  `devices: [{id, name, pub}]`. A full list, not diffs — clients stay
+  trivially consistent.
+- `sdp` / `ice` (signaling relay, M2 step ②): `to` = target device ID,
+  `side` = `"offer" | "answer"`, `body` = opaque pion SDP/ICE JSON. The
+  hub overwrites `from` with the authenticated sender (no spoofing) and
+  delivers only to members of the same group; an offline target gets an
+  `error` frame. Non-trickle ICE: candidates ride inside the SDP, one
+  exchange per direction — no ICE candidate flood.
+- `error` (hub→client): sent before the hub closes a connection it
+  rejects.
 
-**Relay fallback:** if ICE fails after ~8 s, both sides open
-`wss://xfer.example.com/relay/<code>`. Frames relayed through the hub are
-additionally wrapped in AES-256-GCM with `HKDF-SHA256(roomSecret, "relay-e2e")`
-— the hub pipes ciphertext it cannot decrypt (`SECURITY.md` §5).
+The hub is stateless and RAM-only: no disk writes, no secrets, sessions
+expire after 24 h. Device identity is a per-device Ed25519 key at
+`~/.config/chunkdrop/device.key` (0600); the ID is
+hex(SHA-256(public key)).
+
+### Transfer path (implemented, step ②)
+
+Once signaling completes, each direction gets its own PeerConnection
+(offerer dials through its own PC — no glare) with one DataChannel per
+HTTP connection. The DataChannel carries plain HTTP/1.1 requests and
+responses (chunked bodies) between the two engines' mesh APIs — the
+exact same endpoints LAN peers use. SCTP message size (65536) bounds
+the write granularity (16 KiB chunks); backpressure applies above
+1 MiB of unacked channel data. The hub sees none of this traffic.
+
+### Relay fallback (step ③ — provisional)
+
+If ICE fails, transfers fall back to the hub's own WSS relay (capped
+at 80 Mbit/s), again carrying the same HTTP protocol. The bytes stay
+under the engine's TLS session to the hub (`SECURITY.md` §5).
 
 ## 6. Resume state (M3 — provisional)
 

@@ -65,7 +65,7 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
 - [x] **Phone mtime**: photos' **modified** date is their original date
       (not "now"); on Windows the **created** date is original too
       (on Linux/macOS the "created"/birth column is always "now" —
-      filesystem limitation, `USAGE.md` §5.12).
+      filesystem limitation, `USAGE.md` §5.11).
 
 ## D. PC↔PC sync folder
 
@@ -90,7 +90,7 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
       with a 30 GiB batch in flight → 400 `not enough disk space:
       need… free… reserved… available…`; dashboard gets the error
       line; after closing the 30 GiB link the 40 GiB batch starts).
-      (`SECURITY.md` §6, `USAGE.md` §5.12)
+      (`SECURITY.md` §6, `USAGE.md` §5.11)
 
 ## F. Restart behavior
 

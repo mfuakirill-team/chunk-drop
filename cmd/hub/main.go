@@ -18,7 +18,7 @@ import (
 	"chunkdrop/internal/hub"
 )
 
-const version = "0.1.0-m2.1"
+const version = "0.1.0-m2.2"
 
 func usage() {
 	fmt.Print(`hub — ChunkDrop coordination server (M2)

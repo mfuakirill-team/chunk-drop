@@ -77,7 +77,7 @@ Definition of done (from `PLAN.md`):
 - [ ] Windows 10/11 (amd64): firewall prompt on first run (expected), engine runs
 - [ ] iPhone Safari: scan QR from camera → save 4 GB file → verify in Files app
 - [ ] Desktop Firefox as a receiver (desktop browsers covered the
-      desktop→desktop pass; Firefox has the known flat-folder quirk, §5.12)
+      desktop→desktop pass; Firefox has the known flat-folder quirk, §5.11)
 - [ ] **Honest failure test**: close the tab mid-transfer → restarts cleanly
       (resume-after-close is M3, not M0 — must not corrupt anything)
 
@@ -120,8 +120,9 @@ not "device-tested".
       exist since M0.1; wrong key would be 401 (`USAGE.md` §5.0)
 - [x] Engine Docker image (`deploy/Dockerfile`, `docker-compose.yml`,
       non-root, ~15 MB, 8090/tcp + 8091/udp, `CHUNKDROP_GROUP_KEY` env)
-      — **for LAN machines (NAS/home server)**; the VPS container
-      (hub: relay + PWA host, client-side opt-out) stays M2 per
+      — **removed in M2**: the engine runs as a plain binary (USAGE
+      §3.1); `deploy/` is now **hub-only** (presence + WebRTC
+      signaling + STUN container, no env vars, no volumes) per
       `DEPLOY-VPS.md`
 - [x] Sync delete-propagation race fixed: per-file "last seen
       announced" epochs — a peer restarting/rescanning no longer makes

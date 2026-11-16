@@ -79,9 +79,8 @@ One link is reusable for several batches ("Send more" on the phone);
 flight, both screens show file names, so you can verify the right
 files are moving.
 
-Prefer running the engine in Docker (home server / NAS)? `deploy/`
-has a lightweight image + compose file — `docs/USAGE.md` §3.1.
-(The VPS gets the *hub* — relay + PWA host — in M2: `docs/DEPLOY-VPS.md`.)
+Docker is used only for the **VPS hub** (presence + WebRTC signaling,
+not the engine): `deploy/` + `docs/DEPLOY-VPS.md`.
 
 ## Why
 

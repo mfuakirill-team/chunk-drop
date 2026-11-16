@@ -1,0 +1,47 @@
+# nginx site for the ChunkDrop hub (copy to
+# /etc/nginx/sites-available/drop.404.mn, symlink into sites-enabled,
+# then certbot --nginx -d drop.404.mn or point the cert paths below).
+#
+# The three classic proxy traps are mandatory (DEPLOY-VPS.md §2):
+#  1. WebSocket upgrade headers — without them the engine's WSS
+#     connection never establishes.
+#  2. Long read/send timeouts — presence connections are long-lived
+#     and quiet (25 s keepalive pings); nginx's default 60 s idle cut
+#     would kill them.
+#  3. proxy_buffering off — signaling frames and (step ③) relayed
+#     bytes must not queue in nginx buffers.
+server {
+    listen 443 ssl;
+    server_name drop.404.mn;
+
+    # certbot manages these:
+    ssl_certificate     /etc/letsencrypt/live/drop.404.mn/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/drop.404.mn/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8085;
+
+        # TRAP 1 — WebSockets do not work without these:
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # TRAP 2 — idle presence connections get silently cut without
+        # this (the engine pings every 25 s; 1 h is deliberately far
+        # above anything the client's keepalive cycle needs):
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
+        # TRAP 3 — nginx buffering strangles relay throughput:
+        proxy_buffering off;
+    }
+}
+
+server {
+    listen 80;
+    server_name drop.404.mn;
+    return 301 https://$host$request_uri;
+}

@@ -165,68 +165,16 @@ What the engine does while running:
 - Sessions expire after **24 h**.
 - `Ctrl+C` (or window close) = clean shutdown, cancels sessions.
 
-### 3.1 Run the engine in Docker (lightweight container)
+### 3.1 The engine runs as a plain binary
 
-> **Where Docker belongs:** the container below is the **engine**
-> (the LAN sender) — handy on a home server/NAS that's always on.
-> The **VPS** container is a different program: the **hub** (relay +
-> PWA host, no LAN discovery, no local files) — that's M2, see
-> `docs/DEPLOY-VPS.md`. Over the global network, transfers then work
-> through the hub unless the client opts out (config flag, M2).
+The engine is a single static binary — no Docker needed on the devices
+that hold files. Run it directly (§3) on Windows/Linux/macOS; it
+auto-detects the LAN, serves the dashboard on 8090/tcp and answers LAN
+discovery beacons on 8091/udp.
 
-The engine ships as a small Docker image (multi-stage: Node builds the
-web app → Go embeds it → Alpine runtime, ~15 MB, non-root, read-only
-root filesystem). Ports: **8090/tcp** (dashboard + chunk API) and
-**8091/udp** (LAN discovery beacons — only meaningful on the LAN).
-
-```bash
-# once: create the config with a fresh group key
-mkdir -p ~/.config/chunkdrop
-echo 'group_key = "'"$(docker run --rm chunkdrop-engine keygen)"'"' \
-  > ~/.config/chunkdrop/engine.toml
-# (or: engine keygen from a plain binary)
-
-docker compose -f deploy/docker-compose.yml up -d --build
-# UI:    http://<engine-ip>:8090/
-# logs:  docker logs -f chunkdrop-engine
-```
-
-Ports: **8090/tcp** (dashboard + chunk API) and **8091/udp** (LAN
-discovery beacons). The container runs as a non-root user, by default
-uid/gid **1000** (`PUID`/`PGID` in `deploy/docker-compose.yml`). Since
-`engine keygen` writes `engine.toml` as `0600`, the container user must
-be the file's owner — if your user is not uid 1000, pass your ids:
-
-```bash
-PUID=$(id -u) PGID=$(id -g) docker compose -f deploy/docker-compose.yml up -d --build
-```
-
-(or `chmod 644 ~/.config/chunkdrop/engine.toml`; or skip the file and
-pass the key as an env var instead:)
-
-```yaml
-environment:
-  - CHUNKDROP_GROUP_KEY=<paste group key here>
-```
-
-Caveats specific to Docker:
-
-- **The dashboard is local-only by default** (SECURITY.md §2): inside a
-  container, "local" means the container itself, so opening the
-  dashboard from your workstation gets a `404`. For a headless NAS
-  engine, add `allow_remote_dashboard = true` to `engine.toml` (still
-  required: the group key). Receiving links work regardless.
-- **QR links advertise the container's LAN IP** — with
-  `network_mode: host` (or `-net=host`) the engine sees the real LAN
-  and QRs work as on a bare-metal host; with the default bridge you
-  may need `bind_ip = "<host LAN ip>"` in the config (§5.4).
-- The container's home `/config` is a writable volume (the config
-  itself is mounted read-only inside it): sync-folder cache and temp
-  files live there. To sync a **host** folder instead, uncomment the
-  `CHUNKDROP_SYNC` mount in `deploy/docker-compose.yml`; the folder
-  must be writable by the container user (`PUID`/`PGID` above — your
-  own ids when you pass them). Otherwise the engine logs the sync
-  folder as unavailable and only direct transfers work.
+The only Docker deployment in this repo is the **VPS hub** (a different
+program: presence + WebRTC signaling, no LAN, no files) — see
+`docs/DEPLOY-VPS.md`.
 
 ---
 
@@ -424,8 +372,7 @@ Otherwise: you're talking to an **old engine binary**. All dashboard
 routes shipped in M0.1–M0.2; a `404` there means the route doesn't
 exist. A wrong *key* answers `401`, never `404`. Fix: rebuild and
 restart the engine, and hard-refresh the page (`Ctrl+Shift+R`) to drop
-the cached old web app. In Docker:
-`docker compose -f deploy/docker-compose.yml up -d --build`.
+the cached old web app.
 
 ### 5.1 "Receiver's browser says it can't reach / connection refused"
 
@@ -524,24 +471,7 @@ restarting looks like — so deletions ping-ponged and never converged.
 Update all engines; a mixed mesh with old builds can still resurrect
 files.
 
-### 5.11 Docker: "engine.toml: permission denied" on a loop
-
-The container runs as a non-root user (`PUID`/`PGID`, default
-`1000`), and `engine keygen` writes `engine.toml` as `0600` — only its
-owner can read it. If your uid is not 1000, start the container as
-yourself (the current compose file supports this):
-
-```bash
-PUID=$(id -u) PGID=$(id -g) docker compose -f deploy/docker-compose.yml up -d --force-recreate
-```
-
-Alternative: `chmod 644 ~/.config/chunkdrop/engine.toml` (group key
-becomes readable to local users), or remove the mount and set
-`CHUNKDROP_GROUP_KEY=<key>` in the compose environment. A host sync
-folder the container cannot write has the same cause — mount it and use
-your `PUID`/`PGID`.
-
-### 5.12 Phone upload problems (M1)
+### 5.11 Phone upload problems (M1)
 
 | Symptom | Cause / fix |
 |---|---|
@@ -637,8 +567,8 @@ browser, and the exact step from this guide.
 | Dashboard: selection frame + Reset, Cancel, Activity feed | ✅ M0.2 |
 | PWA install (iOS Safari, Android Chrome/Firefox) | ✅ M0.2 |
 | Activity as a separate frame below LAN clients | ✅ M0.2 |
-| Engine in Docker (LAN machine, deploy/) | ✅ M0.2 |
-| VPS hub: relay + PWA host, global-network transfers (client opt-out) | ⬜ M2 (`DEPLOY-VPS.md`) |
+| Engine in Docker (LAN machine, deploy/) | ❌ removed in M2 — engine is a plain binary (§3.1) |
+| VPS hub: presence + WebRTC signaling (relay fallback ⬜) | ✅ step ② (`DEPLOY-VPS.md`) |
 | Upload direction (phone → PC) | ⬜ M1 |
 | Internet mode via VPS hub | ⬜ M2 |
 | Resume-after-close for receivers | ⬜ M3 |

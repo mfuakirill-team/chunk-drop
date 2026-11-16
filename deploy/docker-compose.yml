@@ -1,39 +1,47 @@
-# ChunkDrop engine in Docker.
-# Ports: 8090/tcp (HTTP UI + API), 8091/udp (LAN discovery beacons).
+# ChunkDrop hub deployment (M2) — the ONLY container stack in this repo.
+# The hub never joins a LAN, holds no files, stores nothing on disk:
+# presence + WebRTC signaling (+ the WSS relay fallback in a later
+# step) live in RAM only. Authentication is per connection — group tag
+# + device-key signature — so there are NO env vars, NO secrets, NO
+# volumes here.
 #
-# Config: engine.toml (group_key), bind-mounted read-only. The container
-# runs as a non-root user — uid/gid 1000 by default (PUID/PGID), because
-# `engine keygen` writes the config 0600 and only its owner can read it.
-# If `id -u` is not 1000, run:
-#   PUID=$(id -u) PGID=$(id -g) docker compose up -d --build
-# (or `chmod 644 ~/.config/chunkdrop/engine.toml`, or drop the mount and
-# pass CHUNKDROP_GROUP_KEY=<key> in the environment).
+#   hub  :8080 → published on localhost only; nginx (TLS) is the front
+#          door: deploy/nginx-site.conf.example on the host.
+#   stun : coturn in STUN-only mode (no TURN credentials, no relay) —
+#          server-reflexive candidates for WebRTC NAT traversal
+#          (engine.toml: stun_url). Host network so coturn sees the
+#          VPS's real IP (reflexive-address reporting must not be NATed).
 #
-# Usage: docker compose up -d --build
+# Usage (on the VPS):
+#   cd ~/chunkdrop/deploy && docker compose up -d --build
+#   curl -s http://127.0.0.1:8085/healthz   # → ok
 services:
-  chunkdrop-engine:
+  hub:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: chunkdrop-engine
-    container_name: chunkdrop-engine
+    image: chunkdrop-hub
+    container_name: chunkdrop-hub
     restart: unless-stopped
     ports:
-      - "8090:8090"
-      - "8091:8091/udp"
-    # Must match the owner of engine.toml, otherwise the unprivileged
-    # container user cannot read it. Override with PUID/PGID.
-    user: "${PUID:-1000}:${PGID:-1000}"
-    volumes:
-      # read-only config; the engine writes nothing to it
-      - ${CHUNKDROP_CONFIG:-~/.config/chunkdrop/engine.toml}:/config/.config/chunkdrop/engine.toml:ro
-      # optional shared folder (needs writable perms for the uid above):
-      # - ${CHUNKDROP_SYNC:-~/Downloads/chunk-drop-files}:/config/Downloads/chunk-drop-files
-    environment:
-      - HOME=/config
-      # fallback if no engine.toml is mounted:
-      # - CHUNKDROP_GROUP_KEY=<paste group key here>
-    # read-only root filesystem; /config is the one writable volume
+      - "127.0.0.1:8085:8080" # localhost only — nginx is the front door
     read_only: true
-    tmpfs:
-      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # NOTE: no volumes, no environment — the hub is stateless by
+    # design (PLAN.md D5) and authenticates clients itself.
+
+  stun:
+    image: coturn/coturn:4-alpine
+    container_name: chunkdrop-stun
+    restart: unless-stopped
+    # STUN responses carry the server's own addresses; inside a bridge
+    # network those would be Docker-internal IPs, so coturn runs on the
+    # host network (the standard coturn-on-a-VPS setup).
+    network_mode: host
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

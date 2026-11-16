@@ -34,14 +34,16 @@ directory, caps. `engine keygen` prints a fresh group key.
 
 A stateless coordination service. Responsibilities:
 
-- Serves the same web app (embedded via `go:embed`) for internet mode.
-- **WebSocket signaling**: pairs sender and receiver into short-code "rooms",
-  relays SDP/ICE candidates between them.
-- **Fallback relay**: when WebRTC hole-punching fails, both sides open a WSS
-  connection and the hub pipes opaque (end-to-end encrypted) frames between
-  them. See `SECURITY.md` §5 for why the hub still cannot read the bytes.
+- **Presence** per group tag: the hello authenticates group membership
+  (tag = SHA-256 of the group key + a device-key signature) — the group
+  key never crosses the wire, and the hub holds no secrets.
+- **WebSocket signaling**: relays WebRTC SDP/ICE between members of the
+  same group (`sdp`/`ice` frames, sender authenticated, body opaque).
+  Serves **no web pages** — internet sync is engine↔engine only.
+- **Fallback relay (step ③)**: when WebRTC hole-punching fails, the
+  hub's own WSS relay pipes the transfer (capped at 80 Mbit/s).
 - **Never writes user files to disk.** No volume mounts, read-only root
-  filesystem. A `/healthz` endpoint for Docker healthchecks.
+  filesystem. A `/healthz` endpoint for monitoring.
 
 Everything else — TLS, compression, firewall-facing 443 — is handled by the
 nginx already running on the VPS host (`DEPLOY-VPS.md`).
@@ -50,8 +52,9 @@ nginx already running on the VPS host (`DEPLOY-VPS.md`).
 
 One codebase, embedded into **both** binaries with `go:embed`. Served:
 
-- from the **engine** at `http://<lan-ip>:8090/r/` (LAN mode, QR-scanned), and
-- from the **hub** at `https://xfer.example.com/` (internet mode, installable PWA).
+- from the **engine** at `http://<lan-ip>:8090/r/` (LAN mode, QR-scanned).
+
+(The hub serves **no** web pages — internet sync is engine↔engine, M2.)
 
 Two modes in the UI:
 - **Receive mode** — file list, per-file/per-chunk progress, download &
@@ -104,20 +107,20 @@ Engine (PC)                                   Phone browser
 No discovery protocol involved at all — **the QR is both discovery and
 authentication**. This is why M0 works on a phone that has nothing installed.
 
-### Internet send (M2) — the secondary flow
+### Internet sync (M2) — engine↔engine via the hub
 
 ```
-Engine (sender PC)          VPS (nginx → hub in Docker)          Receiver browser
-   │  WSS: create room          │                                    │
-   │───────────────────────────►│── 6-char code + room secret ──►  │
-   │                            │        (engine shows QR/short URL)│
-   │◄──────────── WS signaling: SDP / ICE relayed both ways ──────►│
+Engine A (sender)          VPS (nginx → hub in Docker)          Engine B (receiver)
+   │  WSS: hello (group tag + device-key sig)                        │
+   │───────────────────────────►│                                    │
+   │◄───── presence: online device IDs ─────────────────────────────►│
+   │◄───────── signaling relay: sdp / ice frames ───────────────────►│
    │                                                                  │
-   │════════════ WebRTC DataChannel (direct, DTLS) ════════════════►│
+   │══ WebRTC DataChannel: HTTP mesh protocol unchanged (DTLS) ════►│
    │         bytes never touch the VPS                                │
    │                                                                  │
-   │   if hole-punch fails:                                           │
-   │═══ WSS relay via hub:443, frames AES-GCM end-to-end ═══════════►│
+   │   if hole-punch fails (step ③):                                  │
+   │═══ WSS relay via hub:443 (hub's own relay, 80 Mbit/s cap) ═════►│
 ```
 
 ### USB sneakernet (M4)
@@ -169,10 +172,12 @@ chunkdrop/
 │   ├── webrtc/               # pion glue (M2)
 │   └── usb/                  # marker, import/export, mount polling (M4)
 ├── web/                      # Preact + Vite + TS, built to web/dist,
-│                             #   embedded via go:embed in both binaries
-├── deploy/
-│   ├── Dockerfile            # node→go→distroless multi-stage (hub)
-│   ├── docker-compose.yml
+│                             #   embedded via go:embed in the engine
+├── deploy/                   # hub-only Docker kit (DEPLOY-VPS.md)
+│   ├── Dockerfile            # go→distroless multi-stage (hub; no Node —
+│   │                         #   the hub serves no web pages)
+│   ├── docker-compose.yml    # hub + coturn (STUN-only, host network)
+│   ├── turnserver.conf
 │   └── nginx-site.conf.example
 └── docs/                     # these documents
 ```
