@@ -88,12 +88,12 @@ PCs through the existing sync mesh.
       failure logged; `httpError` now surfaces the engine's JSON error
       body on the phone/dashboard instead of a blind "HTTP 400".
 - [x] "Send more" after a finished batch → 401 "session not found":
-      the phone shows a friendly "link ended — rescan the QR" message
-      on true 401s, and the dashboard card **auto-renews its QR** when
-      its slot disappears from `/api/activity` (finished / closed /
-      expired / engine restarted). *(Revised after device testing —
-      see below: restart-on-finished was reverted in favour of one
-      link = one batch.)*
+      first fixed with restart-on-finished; after device testing the
+      model was settled as **one link = several batches** — the
+      dashboard card keeps the same QR (finished-but-unexpired slots
+      stay listed flagged `finished: true`, so no re-mint on finish),
+      and the phone shows a friendly "link ended — rescan the QR"
+      message on true 401s (link closed / expired / engine restarted).
 - [x] "Close link" then "send more" still worked on the device: the
       card auto-renewed its QR after the phone's batch finished, the
       user's Close killed the *renewed* slot, but the phone's *old
@@ -126,9 +126,17 @@ PCs through the existing sync mesh.
       in the UI) and the ▲ receiving line lists files being pulled.
 
 ### 4. M0 leftovers (not blocking M1)
-- [ ] Device test matrix (M0-TASKS step 9) — needs real hardware.
-- [ ] Distribution (step 10) — blocked on repo name / public-private /
-      license decisions (PLAN §6).
+- [x] Distribution: repo `mfuakirill-team/chunk-drop` (public, GPL-3
+      `LICENSE` as-is); GitHub Actions build all four engines on
+      Debian Trixie on every push and publish raw binaries +
+      `SHA256SUMS` to the rolling `dev-build` prerelease; tagged `v*`
+      releases get the same via `release.yml` (owner creates the
+      release in the UI). `v0.1.0` tag: owner cuts it when ready.
+      README carries the supported-platforms + download section.
+- [ ] Device-test matrix remainder (see `DEVICE-TESTS.md`): Windows
+      engine + firewall prompt, iPhone Safari, receiver-tab
+      close/reopen, sender `Ctrl+C` mid-transfer, 24 h TTL — needs the
+      hardware/situation; everything else is device-ticked.
 
 ### Docs
 - [x] PROTOCOL §3 (auto-ZIP rule), §4 (upload routes + `/api/upload/new`).

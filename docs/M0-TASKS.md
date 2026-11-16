@@ -68,15 +68,18 @@ Definition of done (from `PLAN.md`):
 - [x] "Copy link" fallback for when QR can't be scanned
 
 ### 9. Cross-compile + manual test matrix
+(Mirrors `DEVICE-TESTS.md` — that file is the live state.)
+- [x] Android Chrome: scan QR → save → verify
+- [x] **Hiccup test**: airplane-mode the phone for 5 s mid-transfer → resumes
+- [x] Wrong/absent session key → 401, no listing, no path hints
+- [x] Ubuntu/Debian amd64 (the Linux desktop passes in DEVICE-TESTS;
+      arm64 build ready for later NAS use)
 - [ ] Windows 10/11 (amd64): firewall prompt on first run (expected), engine runs
-- [ ] Ubuntu/Debian amd64 (+ arm64 build for later NAS use)
 - [ ] iPhone Safari: scan QR from camera → save 4 GB file → verify in Files app
-- [ ] Android Chrome: same
-- [ ] Desktop Firefox + Chrome as receivers
-- [ ] **Hiccup test**: airplane-mode the phone for 5 s mid-transfer → resumes
+- [ ] Desktop Firefox as a receiver (desktop browsers covered the
+      desktop→desktop pass; Firefox has the known flat-folder quirk, §5.12)
 - [ ] **Honest failure test**: close the tab mid-transfer → restarts cleanly
       (resume-after-close is M3, not M0 — must not corrupt anything)
-- [ ] Wrong/absent session key → 401, no listing, no path hints
 
 ### 10. Distribution (zero cost)
 - [x] GitHub Releases are automated (`.github/workflows/release.yml`):

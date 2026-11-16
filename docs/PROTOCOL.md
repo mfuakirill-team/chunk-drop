@@ -204,10 +204,11 @@ Normative details:
 - Finish stamps each landed file's **modification** time from the
   phone's `mtime`; on Windows the **creation** time is stamped too.
   (Linux/macOS filesystems have no userspace API for birth time.)
-- Finished slots are not reported as live (`/api/activity` "incoming"
-  lists in-flight uploads only) — the dashboard's upload card treats
-  its slot id disappearing from that list as "link spent" and mints a
-  fresh QR automatically.
+- Finished-but-unexpired slots stay in `/api/activity` "incoming",
+  flagged `finished: true` (batch done, key still live) — the
+  dashboard's card keeps the same QR and never re-mints while the slot
+  exists; only an expired/deleted slot's absence triggers a re-mint
+  (and never after a manual close).
 - The `{uploadId}` in the URL path must belong to the authenticated
   key; a mismatch gets the generic `404` (nothing about other slots).
 - Uploads land in the **sync folder** by default so they propagate to

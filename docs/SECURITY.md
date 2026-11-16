@@ -60,13 +60,15 @@ reads user files.**
 ## 6. Hardening checklist
 
 Engine:
-- [ ] Constant-time key comparison on every authenticated endpoint
-- [ ] All `PROTOCOL.md` §8 path rules, unit-tested (traversal, reserved
+- [x] Constant-time key comparison on every authenticated endpoint
+- [x] All `PROTOCOL.md` §8 path rules, unit-tested (traversal, reserved
       names, unicode, collisions, trailing dots)
-- [ ] Per-chunk hash verification on upload (M1) before anything hits disk
-- [ ] Disk-space check before accepting an upload; total-size cap in config
-- [ ] Session auto-expiry (24 h) and manual cancel; sessions RAM-only
-- [ ] Bind only to the chosen LAN interface, not `0.0.0.0`, when possible
+- [x] Per-chunk hash verification on upload (M1) before anything hits disk
+- [x] Total-size cap in config (`max_upload_bytes`, default 100 GiB)
+- [ ] Disk-space check before accepting an upload (not implemented yet —
+      a full disk currently fails the chunk write mid-transfer)
+- [x] Session auto-expiry (24 h) and manual cancel; sessions RAM-only
+- [x] Bind only to the chosen LAN interface, not `0.0.0.0`, when possible
 
 Hub container:
 - [ ] `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, no volumes

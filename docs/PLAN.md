@@ -72,10 +72,12 @@ M0 and M1 need **no server at all** — the engine serves the web page itself.
 
 ## 6. Open questions (decide before/at M0)
 
-- [ ] Final name and repository (public on GitHub gives free Releases + CI; private is fine if binaries are served from the VPS).
-- [ ] License (recommend Apache-2.0; MIT acceptable).
+- [x] Final name and repository: `chunk-drop`, public on GitHub
+      (`mfuakirill-team/chunk-drop`) — free Releases + Actions CI.
+- [x] License: GPL-3 (the FSF text in `LICENSE`, as-is; no "or later"
+      clause — SPDX GPL-3.0-only).
 - [ ] Subdomain on the existing domain, e.g. `xfer.example.com` (needed only at M2).
-- [ ] Engine config format: TOML vs JSON (either; recommend TOML for hand-editing).
+- [x] Engine config format: TOML (implemented, `internal/config`).
 
 ## 7. Next action
 

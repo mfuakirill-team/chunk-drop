@@ -95,7 +95,7 @@ real devices. ~30 minutes with two laptops + a phone. Tick as you go.
 
 ---
 
-**When all boxes tick**: M0 + M1 device acceptance is done. Then the
-only open items are distribution (GitHub Releases — needs repo
-name/public-private/license decisions, `PLAN.md` §6) and M2 (hub,
+**When all boxes tick**: M0 + M1 device acceptance is done. After
+that: cut the `v0.1.0` release (owner, in the GitHub UI — the Release
+workflow builds and attaches the binaries automatically) and M2 (hub,
 needs explicit go-ahead).

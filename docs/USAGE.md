@@ -283,7 +283,9 @@ Below the **LAN clients** card sits its own **Activity** card showing:
   receiver is pulling right now, and each ▼ phone-push line lists the
   incoming file name(s) (`▼ phone pushing 2 file(s) — a.jpg, b.jpg +
   1 more — 2.1 GiB / 3.9 GiB`) — so you can verify the right files are
-  moving, not just the byte count.
+  moving, not just the byte count. When a phone batch completes, the
+  line settles into `✓ phone sent N file(s) — … — batch done, link
+  still open` (the QR stays valid for "Send more").
 
 Both panels are read-only views; nothing here changes transfer state.
 
