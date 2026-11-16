@@ -41,6 +41,8 @@ import (
 	"sync"
 	"time"
 
+	"chunkdrop/internal/logx"
+
 	"github.com/pion/webrtc/v4"
 )
 
@@ -296,7 +298,7 @@ func (m *Manager) ensureOut(peer string) *outPC {
 		answers: make(chan *webrtc.SessionDescription, 1),
 	}
 	p.mu.Lock() // block handleAnswer until the PC is wired
-	pc, err := newPC(m.StunURL, &p.gather)
+	pc, err := newPC(m.StunURL, peer+" (out)", &p.gather)
 	if err != nil {
 		p.mu.Unlock()
 		m.mu.Unlock()
@@ -310,8 +312,12 @@ func (m *Manager) ensureOut(peer string) *outPC {
 
 	pc.OnNegotiationNeeded(func() { go p.renegotiate() })
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
+		logx.Debug("tunnel", "%s: connection state %s", peer+" (out)", st)
 		switch st {
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+			if st == webrtc.PeerConnectionStateFailed {
+				logx.Warn("tunnel", "%s: ICE failed — no reachable candidate pair (STUN unreachable → no srflx candidates; or symmetric NAT → needs relay)", peer)
+			}
 			p.kill()
 		case webrtc.PeerConnectionStateConnected:
 			m.logf("connected to %s (outgoing)", peer)
@@ -595,7 +601,7 @@ func (m *Manager) ensureIn(peer string) *inPC {
 	}
 	p := &inPC{m: m, peer: peer, dead: make(chan struct{})}
 	p.mu.Lock() // block handleOffer until the PC is wired
-	pc, err := newPC(m.StunURL, &p.gather)
+	pc, err := newPC(m.StunURL, peer+" (in)", &p.gather)
 	if err != nil {
 		p.mu.Unlock()
 		m.mu.Unlock()
@@ -612,8 +618,12 @@ func (m *Manager) ensureIn(peer string) *inPC {
 		m.pushConn(newConn(dc, peer))
 	})
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
+		logx.Debug("tunnel", "%s (in): connection state %s", peer, st)
 		switch st {
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+			if st == webrtc.PeerConnectionStateFailed {
+				logx.Warn("tunnel", "%s (in): ICE failed — no reachable candidate pair (STUN unreachable → no srflx candidates; or symmetric NAT → needs relay)", peer)
+			}
 			p.kill()
 		case webrtc.PeerConnectionStateConnected:
 			m.logf("connected to %s (incoming)", peer)
@@ -637,8 +647,10 @@ func (m *Manager) lookupIn(peer string) *inPC {
 
 // newPC builds one PeerConnection with the tunnel's common settings.
 // gather is created here and closed by the OnICECandidate wiring when
-// ICE gathering completes.
-func newPC(stunURL string, gather *chan struct{}) (*webrtc.PeerConnection, error) {
+// ICE gathering completes. label names the PC in log lines
+// ("<peer> (out)" / "<peer> (in)") — the only way to tell which
+// direction a debug line belongs to.
+func newPC(stunURL, label string, gather *chan struct{}) (*webrtc.PeerConnection, error) {
 	se := webrtc.SettingEngine{}
 	// Loopback candidates let engines on the same machine (tests,
 	// VMs) still connect; ICE ranks them below LAN routes anyway and
@@ -655,10 +667,31 @@ func newPC(stunURL string, gather *chan struct{}) (*webrtc.PeerConnection, error
 	}
 	*gather = make(chan struct{})
 	var once sync.Once
+	// Candidate tally: with --debug this answers the first question of
+	// any remote-NAT diagnosis — were server-reflexive candidates
+	// gathered at all? Zero srflx means STUN was unreachable (server
+	// down, firewall, VPN) and only private host candidates went out;
+	// srflx present but no connection means the NATs won't punch
+	// (symmetric — relay fallback territory).
+	var nHost, nSrflx, nOther int
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil { // nil = gathering complete
-			once.Do(func() { close(*gather) })
+			once.Do(func() {
+				close(*gather)
+				logx.Debug("tunnel", "%s: gather complete: %d host, %d srflx, %d other candidates",
+					label, nHost, nSrflx, nOther)
+			})
+			return
 		}
+		switch c.Typ {
+		case webrtc.ICECandidateTypeHost:
+			nHost++
+		case webrtc.ICECandidateTypeSrflx:
+			nSrflx++
+		default:
+			nOther++
+		}
+		logx.Debug("tunnel", "%s: candidate %s %s:%d", label, c.Typ, c.Address, c.Port)
 	})
 	return pc, nil
 }
@@ -673,6 +706,11 @@ func waitGathered(pc *webrtc.PeerConnection, gather chan struct{}) (webrtc.Sessi
 		select {
 		case <-gather:
 		case <-time.After(gatherTimeout):
+			// Diagnosability: SRFLX candidates come from STUN — a
+			// gather that never completes means STUN is unreachable
+			// (server down, firewall, VPN) and the SDP will carry host
+			// candidates only.
+			logx.Debug("tunnel", "gather incomplete after %v — STUN slow or unreachable? (SDP carries host candidates only)", gatherTimeout)
 		}
 	}
 	desc := pc.LocalDescription()
