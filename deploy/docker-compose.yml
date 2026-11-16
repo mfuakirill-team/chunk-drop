@@ -44,12 +44,17 @@ services:
       - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
     read_only: true
     cap_drop: [ALL]
-    # NO `no-new-privileges` here (the hub keeps it): the coturn image
-    # ships file capabilities on /usr/bin/turnserver
-    # (setcap CAP_NET_BIND_SERVICE=+ep), and Linux refuses execve with
-    # EPERM for a file with fcaps when no_new_privs is set — the
-    # container would die with exit 126 "Operation not permitted".
-    # Hardening is not weakened: the image already runs as
-    # nobody:nogroup, the empty capability bounding set (cap_drop ALL)
-    # masks the file cap at exec, and the rootfs is read-only. STUN
-    # binds port 3478 — unprivileged, no cap needed.
+    # The coturn image ships file capabilities on /usr/bin/turnserver
+    # (setcap CAP_NET_BIND_SERVICE=+ep), and TWO Linux exec rules bite:
+    #   1. no-new-privileges refuses exec of a fcaps-carrying file with
+    #      EPERM (that alone was the first "Operation not permitted").
+    #   2. execve also fails with EPERM when the file's fcaps are not a
+    #      subset of the capability bounding set — cap_drop ALL empties
+    #      the bounding set, so it kept failing even after (1) was
+    #      removed.
+    # Fix: keep everything dropped but add back exactly the one cap the
+    # image intends to use. STUN binds port 3478 (unprivileged), so the
+    # cap is never exercised at runtime — it exists solely to satisfy
+    # the bounding-set rule at exec. No no-new-privileges on this
+    # service (rule 1); hub keeps its own hardening untouched.
+    cap_add: [NET_BIND_SERVICE]
