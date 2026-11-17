@@ -183,19 +183,31 @@ func Keygen() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(k), nil
 }
 
-// ValidKey reports whether s is acceptable as a group key: a single
-// token of printable ASCII with no quoting characters (it is written
-// into a TOML basic string). `engine keygen` output always passes.
+// ValidKey reports whether s can be stored as a group key: it must be
+// representable in a TOML basic string and an HTTP header — printable
+// characters, no quotes or backslashes, no control characters. There is
+// deliberately no strength requirement: a key either matches the group
+// or it does not, and the owner may choose any value (a 4-character
+// "test" is a valid — if weak — group key).
 func ValidKey(s string) bool {
-	if len(s) < 8 || len(s) > 256 {
+	if s == "" || len(s) > 256 {
 		return false
 	}
 	for _, r := range s {
-		if r < '!' || r > '~' || r == '"' || r == '\\' {
+		if r < ' ' || r > '~' || r == '"' || r == '\\' {
 			return false
 		}
 	}
 	return true
+}
+
+// UsableKey reports whether k can actually gate the mesh: a real key —
+// not empty and not the first-run placeholder. The placeholder in a
+// fresh engine.toml is NOT a configured key: the dashboard must be
+// allowed to set the first key without presenting it as a credential,
+// and no dashboard route may treat it as one.
+func UsableKey(k string) bool {
+	return k != "" && !strings.Contains(k, "<paste")
 }
 
 // SaveGroupKey rewrites the group_key line in the engine.toml at path,

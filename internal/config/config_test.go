@@ -9,14 +9,39 @@ import (
 
 func TestValidKey(t *testing.T) {
 	good, _ := Keygen()
-	for _, k := range []string{good, "simple-key-1", "aB3_-+/=.xyz"} {
+	for _, k := range []string{good, "simple-key-1", "aB3_-+/=.xyz", "test", "short", "has space"} {
 		if !ValidKey(k) {
 			t.Errorf("ValidKey(%q) = false, want true", k)
 		}
 	}
-	for _, k := range []string{"", "short", "has space", "quote\"key", "back\\slash", strings.Repeat("x", 257)} {
+	for _, k := range []string{
+		"",
+		"quote\"key",
+		"back\\slash",
+		"tab\tchar",
+		strings.Repeat("x", 257),
+	} {
 		if ValidKey(k) {
 			t.Errorf("ValidKey(%q) = true, want false", k)
+		}
+	}
+}
+
+// UsableKey gates the mesh and the dashboard credential: a real key,
+// never empty and never the fresh-install placeholder.
+func TestUsableKey(t *testing.T) {
+	for _, k := range []string{"test", "has space", "abc12345"} {
+		if !UsableKey(k) {
+			t.Errorf("UsableKey(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []string{
+		"",
+		"<paste `engine keygen` output here>",
+		`group_key = "<paste ..."`,
+	} {
+		if UsableKey(k) {
+			t.Errorf("UsableKey(%q) = true, want false", k)
 		}
 	}
 }
@@ -94,7 +119,7 @@ func TestSaveGroupKeyCreatesFile(t *testing.T) {
 func TestSaveGroupKeyRejectsInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "engine.toml")
-	if err := SaveGroupKey(path, "bad key with spaces"); err == nil {
+	if err := SaveGroupKey(path, "bad\"quoted"); err == nil {
 		t.Fatal("invalid key accepted")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

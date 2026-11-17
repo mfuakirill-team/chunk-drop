@@ -173,7 +173,7 @@ func run(portFlag int, bindFlag string, noBrowser bool) error {
 	}
 	deviceID := ident.ID
 
-	if !keyOK(cfg.GroupKey) {
+	if !config.UsableKey(cfg.GroupKey) {
 		log.Printf("NOTE: no group key configured yet — set one in the dashboard")
 		log.Printf("      (or run `engine keygen` and paste the output into %s)", cfgPath)
 	}
@@ -385,14 +385,6 @@ func itoa(p int) string {
 	return fmt.Sprintf("%d", p)
 }
 
-// keyOK reports whether k is a usable group key (set and not the
-// first-run placeholder). Deliberately looser than config.ValidKey
-// (which gates NEW dashboard-submitted keys): a legacy hand-written
-// key with a space must keep working.
-func keyOK(k string) bool {
-	return k != "" && !strings.Contains(k, "<paste")
-}
-
 // meshDeps is everything the mesh runtime needs that does NOT change
 // on a live rekey: identity, engine config (hub/stun URLs), server
 // wiring, the shared-folder state and the disk-space ledger.
@@ -449,7 +441,7 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 	// Hub connection (M2 step ①): online presence of the internet
 	// mesh. Optional (hub_url empty = off); LAN behavior is unchanged.
 	// The client reconnects forever on its own with backoff.
-	if d.cfg.HubURL != "" && keyOK(key) && d.ident != nil {
+	if d.cfg.HubURL != "" && config.UsableKey(key) && d.ident != nil {
 		m.hub = hubclient.New(d.cfg.HubURL, key, d.ident, logx.Adapter(logx.LevelInfo, "hub"))
 		// m.tunnelMgr is the M2 step ② WebRTC tunnel: DataChannels
 		// carrying the mesh HTTP protocol to hub peers.
@@ -473,7 +465,7 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 
 	// Shared-folder auto-transfer (#6): only when a key is configured
 	// (the mesh is group-key gated — syncmesh never trusts strangers).
-	if keyOK(key) && d.local != nil {
+	if config.UsableKey(key) && d.local != nil {
 		puller := &syncmesh.Puller{GroupKey: key, Logf: logx.Adapter(logx.LevelInfo, "sync"), Act: d.act, Space: d.space}
 		runner := &syncmesh.Runner{
 			Local:    d.local,
@@ -531,45 +523,67 @@ func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 	return out
 }
 
-// keyDebounce is the dashboard's change-of-mind window: keys land in
-// engine.toml (and the mesh rekeys) only after the typing has stopped
-// for this long — correcting a typo must not kick the whole mesh.
-const keyDebounce = 20 * time.Second
+// keySaveDelay is the engine.toml write window: the mesh rekeys the
+// moment a key is submitted (instant apply), but the config write is
+// deferred — correcting a typo inside the window saves only once, with
+// the final value. The apply itself never waits.
+const keySaveDelay = 20 * time.Second
 
-// keyApplier stages dashboard-submitted group keys and applies the
-// last one after the debounce: persist to engine.toml (comments and
-// other settings preserved), then rebuild the mesh live. Exactly one
+// keyApplier applies dashboard-submitted group keys: the mesh rekeys
+// immediately on submit (Stage), and the engine.toml write follows
+// after keySaveDelay with the latest value (comments and other
+// settings preserved via config.SaveGroupKey). Exactly one mesh
 // incarnation is alive at a time; the engine shuts it down on exit.
 type keyApplier struct {
 	cfgPath string
 	deps    meshDeps
 
-	mu    sync.Mutex
-	timer *time.Timer
-	cur   *meshRuntime
+	mu      sync.Mutex
+	pending string      // latest applied key not yet saved to engine.toml
+	timer   *time.Timer // fires once to save the pending key
+	cur     *meshRuntime
 }
 
-// Stage records a submitted key and (re)starts the debounce window.
-// Called from the HTTP handler (POST /api/key) — fast, no I/O.
+// Stage applies a submitted key now (mesh rekey) and (re)arms the
+// engine.toml save. Called from the HTTP handler (POST /api/key) —
+// the rekey runs before the response goes out, so the dashboard sees
+// the new mesh immediately.
 func (k *keyApplier) Stage(key string) {
 	if os.Getenv(config.DefaultGroupKeyEnv) != "" {
 		log.Printf("note: %s is set — it overrides engine.toml on the next restart",
 			config.DefaultGroupKeyEnv)
 	}
-	log.Printf("dashboard: new group key staged — applying in ~%ds (keep typing to change your mind)",
-		int(keyDebounce.Seconds()))
+	k.rekey(key)
 	k.mu.Lock()
-	defer k.mu.Unlock()
+	k.pending = key
 	if k.timer != nil {
 		k.timer.Stop()
 	}
-	k.timer = time.AfterFunc(keyDebounce, func() {
-		if err := config.SaveGroupKey(k.cfgPath, key); err != nil {
-			log.Printf("group key persist failed: %v (applying live anyway — a restart will revert it)", err)
-		}
-		log.Printf("group key updated from dashboard — rekeying the mesh")
-		k.rekey(key)
-	})
+	k.timer = time.AfterFunc(keySaveDelay, func() { k.save(key) })
+	k.mu.Unlock()
+	log.Printf("dashboard: group key applied — mesh rekeyed; engine.toml updated in ~%ds",
+		int(keySaveDelay.Seconds()))
+}
+
+// save persists the pending key if it is still the latest one (a
+// newer Stage re-arms the timer and takes over). Runs off the lock;
+// only the pending check/clear is guarded.
+func (k *keyApplier) save(key string) {
+	k.mu.Lock()
+	latest := k.pending
+	k.mu.Unlock()
+	if latest != key {
+		return
+	}
+	if err := config.SaveGroupKey(k.cfgPath, latest); err != nil {
+		log.Printf("group key persist failed: %v (applied live anyway — a restart will revert it)", err)
+		return
+	}
+	k.mu.Lock()
+	if k.pending == key {
+		k.pending = ""
+	}
+	k.mu.Unlock()
 }
 
 // rekey swaps the mesh incarnation under the lock (also the initial
@@ -584,16 +598,25 @@ func (k *keyApplier) rekey(key string) {
 	k.cur = startMesh(key, k.deps)
 }
 
-// stop tears the current incarnation down (engine shutdown).
+// stop tears the current incarnation down (engine shutdown) and
+// flushes an unsaved pending key so a submit right before exit still
+// survives the restart.
 func (k *keyApplier) stop() {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	if k.timer != nil {
 		k.timer.Stop()
 	}
+	pending := k.pending
+	k.pending = ""
 	if k.cur != nil {
 		k.cur.stop()
 		k.cur = nil
+	}
+	k.mu.Unlock()
+	if pending != "" {
+		if err := config.SaveGroupKey(k.cfgPath, pending); err != nil {
+			log.Printf("group key persist failed on shutdown: %v", err)
+		}
 	}
 }
 
@@ -635,7 +658,7 @@ func (pickerAdapters) PickFolder() ([]string, error) { return picker.Folder() }
 // The device ID comes from the persistent identity — beacons carry
 // it, so the LAN identity always matches the hub identity (M2).
 func discService(key, id, name string, port int) *discovery.Service {
-	if !keyOK(key) {
+	if !config.UsableKey(key) {
 		return inactiveDisc(id, name, port)
 	}
 	s, err := discovery.NewService(key, id, name, port)

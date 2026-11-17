@@ -43,9 +43,9 @@ export function SendPage({ onStart, onChange }: Props) {
   const [zip, setZip] = useState(false);
   // #2: persisted group key; #3: plain input, not a password field.
   const [groupKey, setGroupKey] = useState(loadGroupKey);
-  // M2: the key is not just a browser note anymore — it is staged for
-  // the engine (POST /api/key), which applies it ~20 s after the last
-  // change (written to engine.toml, mesh rekeyed live).
+  // M2: the key is not just a browser note anymore — the engine
+  // applies it the moment it is submitted (mesh rekeyed live) and
+  // writes engine.toml ~20 s later.
   const [keyStatus, setKeyStatus] = useState("");
   const keyTimer = useRef<number | null>(null);
   const [started, setStarted] = useState<StartResponse | null>(null);
@@ -59,8 +59,8 @@ export function SendPage({ onStart, onChange }: Props) {
   const setKeyAndSave = (k: string) => {
     setGroupKey(k);
     setKeyStatus("");
-    // 20 s is the engine's change-of-mind window; here a shorter
-    // debounce just avoids a POST per keystroke.
+    // The engine saves to engine.toml ~20 s after the last change;
+    // here a shorter debounce just avoids a POST per keystroke.
     if (keyTimer.current !== null) clearTimeout(keyTimer.current);
     keyTimer.current = window.setTimeout(async () => {
       const prev = loadGroupKey();
@@ -75,11 +75,13 @@ export function SendPage({ onStart, onChange }: Props) {
         });
         if (r.ok) {
           saveGroupKey(k);
-          setKeyStatus("engine applies this key in ~20 s (saved to engine.toml, mesh rekeyed)");
+          setKeyStatus("key applied — mesh rekeyed; engine.toml updated in ~20 s");
         } else if (r.status === 401) {
           setKeyStatus("engine rejected the change — wrong current group key");
         } else if (r.status === 400) {
-          setKeyStatus("invalid key — 8+ printable characters, no spaces or quotes");
+          setKeyStatus(
+            "invalid key — printable characters only (no quotes, backslash or control characters)",
+          );
         } else {
           setKeyStatus(`engine did not accept the key (HTTP ${r.status})`);
         }
@@ -263,7 +265,7 @@ export function SendPage({ onStart, onChange }: Props) {
         <p>
           <input
             type="text"
-            placeholder="group key — engine applies it (engine.toml) ~20 s after you stop typing"
+            placeholder="group key — applied instantly (engine.toml written ~20 s later)"
             value={groupKey}
             onInput={(e) => setKeyAndSave((e.target as HTMLInputElement).value)}
           />

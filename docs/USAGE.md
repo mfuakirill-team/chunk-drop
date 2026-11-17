@@ -74,11 +74,14 @@ The **group key** is the shared secret of your group. It authorizes the
 (phone) never need it; they get per-transfer keys via the QR code.
 
 **Set it in the dashboard** (the normal way): type the key into the
-"group key" field of the sender dashboard. ~20 s after you stop typing
-(in case you change your mind or correct a typo) the engine writes it to
-`engine.toml` — comments and other settings preserved — and rekeys the
-mesh live, no restart. When a key is already set, replacing it requires
-typing the current one (it is the dashboard credential).
+"group key" field of the sender dashboard. It is **applied instantly** —
+the mesh rekeys on the spot, no restart — and `engine.toml` is updated
+~20 s later, so a quick correction within that window is written only
+once. Any key value works (there is no length or character-format
+requirement beyond what TOML and HTTP headers can physically carry:
+no quotes, backslash or control characters). When a key is already set,
+replacing it requires typing the current one (it is the dashboard
+credential); the very first key needs no credential.
 
 ```bash
 # Linux / macOS — the keygen alternative

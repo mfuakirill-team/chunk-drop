@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 
+	"chunkdrop/internal/config"
 	"chunkdrop/internal/logx"
 	"chunkdrop/internal/session"
 )
@@ -65,7 +66,10 @@ func (s *Server) authAny(w http.ResponseWriter, r *http.Request) (*session.Sessi
 func (s *Server) authStart(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cur := s.GroupKey()
-		if cur == "" {
+		// A fresh engine.toml holds the "paste output here" placeholder —
+		// that is not a configured key. Until a real key is set, local
+		// setup routes are the only gate (fail-closed otherwise).
+		if !config.UsableKey(cur) {
 			logx.Warn("auth", "401 on %s: no group key configured", r.URL.Path)
 			http.Error(w, ErrNoSession, http.StatusUnauthorized)
 			return

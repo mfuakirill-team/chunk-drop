@@ -10,7 +10,8 @@ import (
 )
 
 // POST /api/key (M2): the dashboard sets the group key. Local-only;
-// with a key already configured the current key is the credential.
+// with a real key configured the current key is the credential; the
+// engine applies it instantly and defers only the engine.toml write.
 func TestKeySet(t *testing.T) {
 	const oldKey = "old-secret-old-secret-old-secret!"
 	const newKey = "new-secret-new-secret-new-secret!"
@@ -18,19 +19,44 @@ func TestKeySet(t *testing.T) {
 	t.Run("first run — no key configured", func(t *testing.T) {
 		srv, _, _ := newTestServer(t)
 		srv.SetGroupKey("")
-		var staged string
-		srv.OnKey = func(key string) { staged = key }
+		var applied string
+		srv.OnKey = func(key string) { applied = key }
 		h := srv.Handler()
 		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"`+newKey+`"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
-		if staged != newKey {
-			t.Errorf("OnKey = %q, want %q", staged, newKey)
+		if applied != newKey {
+			t.Errorf("OnKey = %q, want %q", applied, newKey)
 		}
 		// The dashboard auth swaps immediately.
 		if srv.GroupKey() != newKey {
-			t.Errorf("GroupKey = %q, want the staged key", srv.GroupKey())
+			t.Errorf("GroupKey = %q, want the applied key", srv.GroupKey())
+		}
+		var out struct {
+			Applied       bool `json:"applied"`
+			SaveInSeconds int  `json:"saveInSeconds"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if !out.Applied || out.SaveInSeconds != keySaveSeconds {
+			t.Errorf("response = applied=%v saveInSeconds=%d", out.Applied, out.SaveInSeconds)
+		}
+	})
+
+	t.Run("fresh install — placeholder is not a credential", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.SetGroupKey("<paste `engine keygen` output here>")
+		var applied string
+		srv.OnKey = func(key string) { applied = key }
+		h := srv.Handler()
+		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"test"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if applied != "test" || srv.GroupKey() != "test" {
+			t.Errorf("applied=%q groupKey=%q, want \"test\"", applied, srv.GroupKey())
 		}
 	})
 
@@ -55,15 +81,30 @@ func TestKeySet(t *testing.T) {
 	t.Run("correct current key accepted", func(t *testing.T) {
 		srv, _, _ := newTestServer(t)
 		srv.SetGroupKey(oldKey)
-		var staged string
-		srv.OnKey = func(key string) { staged = key }
+		var applied string
+		srv.OnKey = func(key string) { applied = key }
 		h := srv.Handler()
 		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", oldKey, `{"key":"`+newKey+`"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
-		if staged != newKey || srv.GroupKey() != newKey {
-			t.Errorf("staged=%q groupKey=%q", staged, srv.GroupKey())
+		if applied != newKey || srv.GroupKey() != newKey {
+			t.Errorf("applied=%q groupKey=%q", applied, srv.GroupKey())
+		}
+	})
+
+	t.Run("short key accepted — no format restrictions", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.SetGroupKey("")
+		var applied string
+		srv.OnKey = func(key string) { applied = key }
+		h := srv.Handler()
+		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"test"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if applied != "test" {
+			t.Errorf("applied = %q, want \"test\"", applied)
 		}
 	})
 
@@ -72,7 +113,7 @@ func TestKeySet(t *testing.T) {
 		srv.SetGroupKey("")
 		srv.OnKey = func(string) { t.Error("OnKey called for invalid key") }
 		h := srv.Handler()
-		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"bad key with spaces"}`)
+		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"bad\tkey"}`)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", rec.Code)
 		}
