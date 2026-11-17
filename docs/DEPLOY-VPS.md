@@ -82,12 +82,18 @@ STUN-only (no relay port range to open).
 
 ## 4. Engine-side config (each device)
 
-In `engine.toml` (created by `engine keygen`):
+Fresh installs are preconfigured — the first-run template already
+contains the defaults:
 
 ```toml
-hub_url  = "wss://drop.404.mn/hub/ws"   # empty = internet mesh off (LAN-only, M0/M1 behavior)
+hub_url  = "wss://drop.404.mn/hub/ws"   # set = internet mesh on
 stun_url = "stun:drop.404.mn:3478"
 ```
+
+An **older** `engine.toml` was written with an explicit empty
+`hub_url = ""` — empty means off, so those engines stay LAN-only until
+you set the two lines above (or set the group key via the dashboard,
+which rewrites the file without touching the hub lines).
 
 Empty `hub_url` keeps the engine exactly as in M0/M1. With both set,
 engines connect to the hub for presence/signaling and sync over the

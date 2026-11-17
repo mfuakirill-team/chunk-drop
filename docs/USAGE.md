@@ -61,8 +61,11 @@ The engine stores its config in your home directory:
 | Linux/macOS | `~/.config/chunkdrop/engine.toml` |
 | Windows | `%APPDATA%\chunkdrop\engine.toml` (Explorer paste works) |
 
-First run creates the file as a template and tells you so. You only ever
-need to set one line — the group key — then optionally the port.
+First run creates the file as a template and tells you so. On a fresh
+install the hub is **already configured** (`hub_url`/`stun_url` point at
+the default hub), so the internet mesh is on out of the box — the only
+line you ever need to change is the group key, and you can do that from
+the dashboard (§2.1) without touching the file at all.
 
 ### 2.1 Group key
 
@@ -70,8 +73,15 @@ The **group key** is the shared secret of your group. It authorizes the
 *sender side* — creating a transfer session from picked paths. Receivers
 (phone) never need it; they get per-transfer keys via the QR code.
 
+**Set it in the dashboard** (the normal way): type the key into the
+"group key" field of the sender dashboard. ~20 s after you stop typing
+(in case you change your mind or correct a typo) the engine writes it to
+`engine.toml` — comments and other settings preserved — and rekeys the
+mesh live, no restart. When a key is already set, replacing it requires
+typing the current one (it is the dashboard credential).
+
 ```bash
-# Linux / macOS
+# Linux / macOS — the keygen alternative
 ./engine keygen                       # prints e.g. "b3f9…-style 43-char key"
 nano ~/.config/chunkdrop/engine.toml  # set: group_key = "<paste output>"
 ```
@@ -82,14 +92,14 @@ nano ~/.config/chunkdrop/engine.toml  # set: group_key = "<paste output>"
 notepad %APPDATA%\chunkdrop\engine.toml
 ```
 
-Paste the keygen output into the `group_key = "…"` line and save.
-
 **Where does the key show up?** In the web dashboard (sender side) you'll
 paste it once per browser; the browser remembers it in `localStorage`.
 Phone receivers never type it.
 
-**Rotation** (`docs/SECURITY.md` §7): when someone leaves the group, run
-`engine keygen` again and hand the new key to the machines you trust.
+**Rotation** (`docs/SECURITY.md` §7): when someone leaves the group, set
+a new key (dashboard or `engine keygen`) and hand it to the machines you
+trust — every engine applies the change live; devices still holding the
+old key drop off until they get the new one.
 
 ### 2.2 Optional settings
 
@@ -98,7 +108,9 @@ Edit `engine.toml`; restart the engine after changes.
 | Key | Default | Meaning |
 |---|---|---|
 | `port` | `8090` | TCP port the server binds. |
-| `bind_ip` | *(auto)* | LAN address to advertise in QR links. Only set it if auto-detect picks the wrong adapter (common with VPNs — see §5.4). |
+| `bind_ip` | *(auto)* | LAN address to advertise in QR links. Only set it if auto-detect picks the wrong adapter (see §5.4 — auto-detect prefers the adapter with the default route and demotes virtual/VPN adapters). |
+| `hub_url` | `wss://drop.404.mn/hub/ws` (fresh installs) | Hub websocket endpoint. Empty (explicitly set in an older config) = internet mesh off: LAN-only, M0/M1 behavior. |
+| `stun_url` | `stun:drop.404.mn:3478` (fresh installs) | STUN server for WebRTC NAT traversal. Empty is fine on a plain LAN. |
 | `allow_remote_dashboard` | `false` | Dashboard/control access from **other devices**. Off: the dashboard works only on the engine machine itself (loopback or its own LAN address); other devices get a 404 even with the group key. Turn on only for headless engines (e.g. a NAS whose dashboard you open from a laptop). Receiving links always work from other devices regardless. |
 | `receive_dir` | *(M1)* | Where received uploads land (upload direction ships in M1). |
 | `max_upload_bytes` | `106253862144` | Per-transfer upload cap (M1). Ignore for now. |
@@ -117,12 +129,18 @@ directory.
 ./engine                     # port from config (default 8090)
 ./engine --port 8091         # one-off port override
 ./engine --bind 192.168.1.20 # pin the advertised LAN IP (see §5.4)
+./engine --no-browser        # do not auto-open the dashboard on start
 ./engine --debug             # verbose logs: every request, chunk, step
 ./engine --log-level warn    # quiet: info hidden (debug|info|warn|error)
-./engine help                # all flags
+./engine help                # all flags + the file paths of THIS setup
 ./engine version
 ./engine keygen              # fresh group key (see §2.1)
 ```
+
+`engine help` prints the exact paths for the current setup — config,
+device key and the default receive folder — so you never have to guess
+where files live. At startup the engine logs the same: the config line
+(`config: …`) appears right after `sync folder: …`.
 
 **Log levels** (`--log-level`, or `--debug` as shorthand for `debug`):
 
@@ -194,7 +212,7 @@ program: presence + WebRTC signaling, no LAN, no files) — see
    4 MiB chunk) → a **QR code** appears. **Cancel** (right of Start)
    ends the session.
 4. Below the QR: **Copy link** (fallback). Live receiver progress moved
-   to the **LAN clients / Activity** panel on the right (§4.1.1).
+   to the **Clients / Activity** panel on the right (§4.1.1).
 
 ### 4.2 On the receiving device
 
@@ -218,8 +236,18 @@ subnet). Nothing installed, no account, no app.
 button): works, but saving needs a desktop browser with the File System
 Access API (Chrome/Edge/Chromium on Windows/Linux).
 
-### 4.2.1 The Activity frame (sender side)
-Below the **LAN clients** card sits its own **Activity** card showing:
+### 4.2.1 The Clients + Activity frames (sender side)
+The **Clients** card lists the whole mesh, joined by the persistent
+device ID (LAN beacons and hub presence carry the same ID):
+
+- **LAN clients** show their IP in the `ip/id` column.
+- **🌐** marks a client that is *also* reachable over the internet via
+  the hub (or only via the hub).
+- **Internet-only clients** have no LAN address — the `ip/id` column
+  shows the first characters of their device ID (hover for the full
+  ID); their `port` is blank.
+
+Below it sits its own **Activity** card showing:
 
 - **Activity** — a concise feed of what's happening: ▲ uploading
   (sessions started, receiver progress), ▼ downloading (sync folder
@@ -566,7 +594,7 @@ browser, and the exact step from this guide.
 | Sync folder `~/Downloads/chunk-drop-files` (PC↔PC) | ✅ M0.1 |
 | Dashboard: selection frame + Reset, Cancel, Activity feed | ✅ M0.2 |
 | PWA install (iOS Safari, Android Chrome/Firefox) | ✅ M0.2 |
-| Activity as a separate frame below LAN clients | ✅ M0.2 |
+| Activity as a separate frame below the Clients card | ✅ M0.2 |
 | Engine in Docker (LAN machine, deploy/) | ❌ removed in M2 — engine is a plain binary (§3.1) |
 | VPS hub: presence + WebRTC signaling (relay fallback ⬜) | ✅ step ② (`DEPLOY-VPS.md`) |
 | Upload direction (phone → PC) | ⬜ M1 |

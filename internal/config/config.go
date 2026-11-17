@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -28,6 +29,14 @@ const DefaultGroupKeyEnv = "CHUNKDROP_GROUP_KEY"
 const (
 	DefaultPort    = 8090
 	DefaultMaxBody = 512 << 20 // progress/manifest POST cap: generous but finite
+
+	// DefaultHubURL / DefaultStunURL preconfigure the internet mesh in
+	// fresh installs and first-run templates: the user runs the engine
+	// and the hub is already wired up. An engine.toml that *explicitly*
+	// sets hub_url = "" still turns the internet mesh off — empty means
+	// off, the preconfigured default is only what a fresh install gets.
+	DefaultHubURL  = "wss://drop.404.mn/hub/ws"
+	DefaultStunURL = "stun:drop.404.mn:3478"
 )
 
 // Config is the engine's TOML file.
@@ -74,6 +83,8 @@ func Default() Config {
 		Port:           DefaultPort,
 		MaxUploadBytes: 100 << 30,
 		ReceiveDir:     "",
+		HubURL:         DefaultHubURL,
+		StunURL:        DefaultStunURL,
 	}
 }
 
@@ -170,6 +181,60 @@ func Keygen() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(k), nil
+}
+
+// ValidKey reports whether s is acceptable as a group key: a single
+// token of printable ASCII with no quoting characters (it is written
+// into a TOML basic string). `engine keygen` output always passes.
+func ValidKey(s string) bool {
+	if len(s) < 8 || len(s) > 256 {
+		return false
+	}
+	for _, r := range s {
+		if r < '!' || r > '~' || r == '"' || r == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+// SaveGroupKey rewrites the group_key line in the engine.toml at path,
+// preserving everything else (comments, field order) — the dashboard
+// sets the key (M2), and the file must stay human-editable. Missing
+// group_key line → appended at the end; missing file → a fresh
+// template with the key filled in. Written 0600 like the rest.
+func SaveGroupKey(path, key string) error {
+	if !ValidKey(key) {
+		return fmt.Errorf("refusing to save invalid group key")
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return fmt.Errorf("create config dir: %w", err)
+		}
+		tmpl := Default()
+		tmpl.GroupKey = key
+		b, err := toml.Marshal(tmpl)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, b, 0o600)
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	line := []byte(`group_key = "` + key + `"`)
+	re := regexp.MustCompile(`(?m)^[ \t]*group_key[ \t]*=.*$`)
+	if re.Match(data) {
+		data = re.ReplaceAll(data, line)
+	} else {
+		if len(data) > 0 && data[len(data)-1] != '\n' {
+			data = append(data, '\n')
+		}
+		data = append(data, line...)
+		data = append(data, '\n')
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 // ChunkSizeDefault re-exports the transfer default for config UIs.

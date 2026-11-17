@@ -42,7 +42,7 @@ func newTestServer(t *testing.T) (*Server, *session.Session, string) {
 		t.Fatal(err)
 	}
 	srv := NewServer(sm, nil)
-	srv.GroupKey = "" // receiver endpoints only; start/pick/sync stay closed
+	srv.SetGroupKey("") // receiver endpoints only; start/pick/sync stay closed
 	return srv, s, s.KeyEncoded()
 }
 
@@ -226,7 +226,7 @@ func TestUIMounts(t *testing.T) {
 // receivers (401) and open to a group member (#1, #6, #7).
 func TestEngineExtrasGated(t *testing.T) {
 	srv, _, _ := newTestServer(t)
-	srv.GroupKey = "group-secret-group-secret-group!!"
+	srv.SetGroupKey("group-secret-group-secret-group!!")
 	syncDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(syncDir, "note.txt"), []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestEngineExtrasGated(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.Sync = local
-	srv.Discovery = discoveryServiceStub{}
+	srv.SetDiscovery(discoveryServiceStub{})
 	h := srv.Handler()
 
 	// wrong/no key → 401 on every extra route
@@ -259,17 +259,17 @@ func TestEngineExtrasGated(t *testing.T) {
 
 	// group member: peers list works, sync state lists the file,
 	// sync start serves a session manifest for the file.
-	if rec := reqKey(t, h, "GET", "/api/peers", srv.GroupKey); rec.Code != http.StatusOK {
+	if rec := reqKey(t, h, "GET", "/api/peers", srv.GroupKey()); rec.Code != http.StatusOK {
 		t.Fatalf("peers = %d", rec.Code)
 	}
-	rec := reqKey(t, h, "GET", "/api/sync/state", srv.GroupKey)
+	rec := reqKey(t, h, "GET", "/api/sync/state", srv.GroupKey())
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sync state = %d", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), `"note.txt"`) {
 		t.Errorf("sync state missing note.txt: %s", rec.Body.String())
 	}
-	rec = reqKeyBody(t, h, "POST", "/api/sync/start", srv.GroupKey, `{"rels":["note.txt"]}`)
+	rec = reqKeyBody(t, h, "POST", "/api/sync/start", srv.GroupKey(), `{"rels":["note.txt"]}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sync start = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -295,7 +295,7 @@ func TestEngineExtrasGated(t *testing.T) {
 	}
 
 	// picker routes: Picker == nil → 404 with a clear body
-	if rec := reqKey(t, h, "POST", "/api/pick/files", srv.GroupKey); rec.Code != http.StatusNotFound {
+	if rec := reqKey(t, h, "POST", "/api/pick/files", srv.GroupKey()); rec.Code != http.StatusNotFound {
 		t.Errorf("pick files without picker = %d, want 404", rec.Code)
 	}
 }
@@ -347,7 +347,7 @@ func TestStartRequiresGroupKey(t *testing.T) {
 	if rec := post(t, h, "/api/start", "anything", `{"paths":["/tmp"]}`); rec.Code != http.StatusUnauthorized {
 		t.Errorf("start without group key = %d, want 401", rec.Code)
 	}
-	srv.GroupKey = "group-secret-group-secret-group!!"
+	srv.SetGroupKey("group-secret-group-secret-group!!")
 	if rec := post(t, h, "/api/start", "wrong", `{"paths":["/tmp"]}`); rec.Code != http.StatusUnauthorized {
 		t.Errorf("start with wrong group key = %d, want 401", rec.Code)
 	}
@@ -369,8 +369,8 @@ func TestDashboardLocalOnly(t *testing.T) {
 		_, _ = io.WriteString(w, "ui")
 	})
 	srv := NewServer(session.NewManager(), stub)
-	srv.GroupKey = "group-secret-group-secret-group!!"
-	srv.Discovery = discoveryServiceStub{}
+	srv.SetGroupKey("group-secret-group-secret-group!!")
+	srv.SetDiscovery(discoveryServiceStub{})
 	dir := t.TempDir()
 	local, err := syncmesh.NewLocal(dir, "testbox", "eng1")
 	if err != nil {
@@ -400,13 +400,13 @@ func TestDashboardLocalOnly(t *testing.T) {
 		{"GET", "/api/peers"},
 		{"GET", "/api/activity"},
 	} {
-		if rec := do(c.method, c.path, remote, srv.GroupKey); rec.Code != http.StatusNotFound {
+		if rec := do(c.method, c.path, remote, srv.GroupKey()); rec.Code != http.StatusNotFound {
 			t.Errorf("%s %s from %s = %d, want 404", c.method, c.path, remote, rec.Code)
 		}
 	}
 
 	// Loopback works.
-	if rec := do("GET", "/api/peers", "127.0.0.1:5000", srv.GroupKey); rec.Code != http.StatusOK {
+	if rec := do("GET", "/api/peers", "127.0.0.1:5000", srv.GroupKey()); rec.Code != http.StatusOK {
 		t.Errorf("loopback peers = %d, want 200", rec.Code)
 	}
 	// So does the host's own LAN address (the local browser's source).
@@ -415,7 +415,7 @@ func TestDashboardLocalOnly(t *testing.T) {
 		return []net.Addr{&net.IPNet{IP: net.ParseIP("203.0.113.7"), Mask: net.CIDRMask(24, 32)}}, nil
 	}
 	t.Cleanup(func() { interfaceAddrs = oldAddrs })
-	if rec := do("GET", "/api/activity", "203.0.113.7:5000", srv.GroupKey); rec.Code != http.StatusOK {
+	if rec := do("GET", "/api/activity", "203.0.113.7:5000", srv.GroupKey()); rec.Code != http.StatusOK {
 		t.Errorf("own LAN address activity = %d, want 200", rec.Code)
 	}
 
@@ -432,14 +432,14 @@ func TestDashboardLocalOnly(t *testing.T) {
 			t.Errorf("remote %s = %d, want 200 (receive page assets must load)", p, rec.Code)
 		}
 	}
-	if rec := do("GET", "/api/sync/state", remote, srv.GroupKey); rec.Code != http.StatusOK {
+	if rec := do("GET", "/api/sync/state", remote, srv.GroupKey()); rec.Code != http.StatusOK {
 		t.Errorf("remote sync state = %d, want 200 (mesh must keep working)", rec.Code)
 	}
 
 	// Opt-in escape hatch: allow_remote_dashboard re-opens the dashboard
 	// (still group-key gated) for headless engines like a NAS.
 	srv.AllowRemoteDashboard = true
-	if rec := do("GET", "/api/peers", remote, srv.GroupKey); rec.Code != http.StatusOK {
+	if rec := do("GET", "/api/peers", remote, srv.GroupKey()); rec.Code != http.StatusOK {
 		t.Errorf("allow_remote_dashboard peers = %d, want 200", rec.Code)
 	}
 	if rec := do("GET", "/api/peers", remote, ""); rec.Code != http.StatusUnauthorized {
@@ -457,7 +457,7 @@ func TestReceivePageAssetsLoadRemotely(t *testing.T) {
 		t.Skip("embedded web bundle not built yet (run make web) — fresh clone")
 	}
 	srv := NewServer(session.NewManager(), webui.Handler())
-	srv.GroupKey = "group-secret-group-secret-group!!"
+	srv.SetGroupKey("group-secret-group-secret-group!!")
 	h := srv.Handler()
 
 	fetch := func(path string) *httptest.ResponseRecorder {
@@ -514,7 +514,7 @@ func TestManifestZipPerReceiver(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := NewServer(sm, nil)
-	srv.GroupKey = ""
+	srv.SetGroupKey("")
 	h := srv.Handler()
 
 	getManifest := func(ua, query string) *transfer.Manifest {

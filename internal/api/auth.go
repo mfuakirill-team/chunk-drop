@@ -60,15 +60,17 @@ func (s *Server) authAny(w http.ResponseWriter, r *http.Request) (*session.Sessi
 
 // authStart gates session creation (sender dashboard) behind the group
 // key from engine config — LAN strangers must not be able to point a
-// session at arbitrary filesystem paths (SECURITY.md §6).
+// session at arbitrary filesystem paths (SECURITY.md §6). The key is
+// read per request: the dashboard can replace it at runtime (M2).
 func (s *Server) authStart(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.GroupKey == "" {
+		cur := s.GroupKey()
+		if cur == "" {
 			logx.Warn("auth", "401 on %s: no group key configured", r.URL.Path)
 			http.Error(w, ErrNoSession, http.StatusUnauthorized)
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get(HeaderKey)), []byte(s.GroupKey)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get(HeaderKey)), []byte(cur)) != 1 {
 			logx.Warn("auth", "401 on %s: wrong group key (from %s)", r.URL.Path, r.RemoteAddr)
 			http.Error(w, ErrNoSession, http.StatusUnauthorized)
 			return

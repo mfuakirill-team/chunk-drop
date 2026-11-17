@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -71,6 +72,7 @@ func main() {
 	logLevel := fs.String("log-level", "", "log level: debug|info|warn|error (default info)")
 	debug := fs.Bool("debug", false, "debug mode — verbose logging of every step and error")
 	showVersion := fs.Bool("version", false, "print the version and exit")
+	noBrowser := fs.Bool("no-browser", false, "do not open the dashboard in a browser on start")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
@@ -96,25 +98,33 @@ func main() {
 		logx.SetLevel(lvl)
 	}
 
-	if err := run(*port, *bind); err != nil {
+	if err := run(*port, *bind, *noBrowser); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func usage() {
-	fmt.Print(`chunkdrop engine — LAN file transfer
+	cfgPath, _ := config.ConfigPath()
+	recvDir, _ := config.DefaultReceiveDir()
+	deviceKey := ""
+	if cfgPath != "" {
+		deviceKey = filepath.Join(filepath.Dir(cfgPath), device.KeyFile)
+	}
+	fmt.Printf(`chunkdrop engine — LAN file transfer
 
 Usage:
   engine [options]      start the sender dashboard on the LAN
-  engine keygen         print a fresh group key (paste into engine.toml)
+  engine keygen         print a fresh group key (or set it in the dashboard)
   engine version        print the build version
   engine help           show this help
 
 Options:
   --port N              port to bind (default: from config, 8090)
   --bind IP             IP to bind and advertise in the QR
-                        (default: auto-detect; pin it if a VPN or virtual
-                        adapter is picked instead of your real Wi-Fi IP)
+                        (default: auto-detect; the adapter with the
+                        default route wins — pin it if a VPN or virtual
+                        adapter is picked instead of your real LAN IP)
+  --no-browser          do not open the dashboard in a browser on start
   --debug               verbose logs: every request, chunk and step
   --log-level LEVEL     noise filter: debug|info|warn|error (default: info)
                         (--debug is shorthand for --log-level debug)
@@ -123,9 +133,11 @@ Options:
 
 Single-dash spellings (-port, -bind, …) are accepted too.
 
-Config: ~/.config/chunkdrop/engine.toml (Linux)
-        %APPDATA%\chunkdrop\engine.toml (Windows)
-`)
+Files on this setup (%s):
+  config:      %s
+  device key:  %s
+  received:    %s  (when receive_dir is unset)
+`, runtime.GOOS, cfgPath, deviceKey, recvDir)
 }
 
 func printVersion() {
@@ -134,7 +146,7 @@ func printVersion() {
 
 // Package main wiring note (#1.3): one shared activity feed drives both
 // the dashboard status panel and engine console lines.
-func run(portFlag int, bindFlag string) error {
+func run(portFlag int, bindFlag string, noBrowser bool) error {
 	cfg, cfgPath, err := config.Load()
 	if err != nil {
 		return err
@@ -146,20 +158,24 @@ func run(portFlag int, bindFlag string) error {
 		cfg.Port = config.DefaultPort
 	}
 
-	// Device identity (M2): a persistent Ed25519 key pair at
+	// Device identity (M2, required): a persistent Ed25519 key pair at
 	// <configDir>/device.key — the same machine keeps the same device
 	// ID across restarts, both on the LAN (discovery beacons) and at
-	// the hub. The key file never lives in the sync folder (it would
-	// replicate to every device). Failure only disables the internet
-	// mesh; the engine keeps running.
+	// the hub. The beacon ID *is* the device ID, so LAN peers and hub
+	// presence always join by the same identity. Without the key file
+	// there is no mesh identity at all — fail loudly instead of
+	// half-working (the key file never lives in the sync folder: it
+	// would replicate to every device).
 	ident, identErr := device.LoadOrCreate(filepath.Dir(cfgPath), lanip.Hostname())
 	if identErr != nil {
-		log.Printf("device identity unavailable: %v (internet mesh off)", identErr)
+		return fmt.Errorf("device identity unavailable: %w — ChunkDrop needs a persistent device identity; check write permissions on %s",
+			identErr, filepath.Dir(cfgPath))
 	}
+	deviceID := ident.ID
 
-	if cfg.GroupKey == "" || strings.Contains(cfg.GroupKey, "<paste") {
-		log.Printf("NOTE: no group key configured yet — run `engine keygen` and")
-		log.Printf("      paste the output into %s", cfgPath)
+	if !keyOK(cfg.GroupKey) {
+		log.Printf("NOTE: no group key configured yet — set one in the dashboard")
+		log.Printf("      (or run `engine keygen` and paste the output into %s)", cfgPath)
 	}
 
 	// LAN IP detection (M0-TASKS.md step 3): enumerate candidates,
@@ -208,120 +224,49 @@ func run(portFlag int, bindFlag string) error {
 	sm := session.NewManager()
 	ui := webui.Handler()
 	srv := api.NewServer(sm, ui)
-	srv.GroupKey = cfg.GroupKey
+	srv.SetGroupKey(cfg.GroupKey)
 	srv.Picker = pickerAdapters{}
 	srv.Activity = act // #1.3: concise feed → dashboard status panel
 	// Dashboard is local-only by default (it controls this PC).
 	srv.AllowRemoteDashboard = cfg.AllowRemoteDashboard
 
-	// LAN discovery (#5/#7): UDP broadcast beacons authenticated by
-	// an HMAC of the group key; inactive when no key is configured.
-	// Beacons carry the persistent device ID (M2): same machine = same
-	// identity on the LAN and at the hub.
-	deviceID := ""
-	if ident != nil {
-		deviceID = ident.ID
+	// Shared-folder state (key-independent): feeds the syncmesh
+	// runner and the dashboard; a dashboard rekey does not touch it.
+	var local *syncmesh.Local
+	if dir, derr := syncmesh.SyncDir(); derr != nil {
+		log.Printf("sync dir unavailable: %v", derr)
+	} else if l, lerr := syncmesh.NewLocal(dir, lanip.Hostname(), deviceID); lerr != nil {
+		log.Printf("sync scan failed: %v", lerr)
+	} else {
+		local = l
+		srv.Sync = l
+		log.Printf("sync folder: %s", dir)
+		// Where the config that shapes this run lives — right after
+		// the sync folder, so a user reading top-down sees both.
+		log.Printf("config: %s", cfgPath)
+		act.Add(activity.KindInfo, "sync folder: "+dir)
 	}
-	disc := discService(cfg, deviceID, lanip.Hostname(), cfg.Port)
-	srv.Discovery = disc
+
 	handler := srv.Handler()
 
-	// Hub connection (M2 step ①): online presence of the internet
-	// mesh. Optional (hub_url empty = off); LAN behavior is unchanged.
-	// The client reconnects forever on its own with backoff.
-	var hubStop func()
-	// tunnelMgr is the M2 step ② WebRTC tunnel: DataChannels carrying
-	// the mesh HTTP protocol to hub peers. nil without a hub.
-	var tunnelMgr *tunnel.Manager
-	var hubClient *hubclient.Client
-	if cfg.HubURL != "" && ident != nil && deviceID != "" && cfg.GroupKey != "" {
-		hubClient = hubclient.New(cfg.HubURL, cfg.GroupKey, ident, logx.Adapter(logx.LevelInfo, "hub"))
-		tunnelMgr = tunnel.New(deviceID, cfg.StunURL, hubClient.SendSignal)
-		tunnelMgr.Logf = logx.Adapter(logx.LevelInfo, "tunnel")
-		hubClient.OnSignal = tunnelMgr.SignalIn
-		hubClient.Start()
-		// The tunnel's listener serves the same mesh handler a LAN
-		// peer would hit: identical requests, different transport.
-		tunnelSrv := &http.Server{
-			Handler:           handler,
-			ReadHeaderTimeout: 15 * time.Second,
-			IdleTimeout:       2 * time.Minute,
-		}
-		go tunnelSrv.Serve(tunnelMgr.Listener())
-		srv.Hub = hubClient
-		hubStop = func() {
-			_ = tunnelSrv.Close()
-			tunnelMgr.Close()
-			hubClient.Stop()
-		}
-		log.Printf("hub: %s — internet mesh on", cfg.HubURL)
-	} else if cfg.HubURL != "" {
-		log.Printf("hub: %s configured but unavailable (%s) — internet mesh off",
-			cfg.HubURL, hubDisableReason(identErr, cfg.GroupKey))
-	}
-
-	// Shared-folder auto-transfer (#6): only when a key is configured
-	// (the mesh is group-key gated — syncmesh never trusts strangers).
-	var syncStop = make(chan struct{})
-	if cfg.GroupKey != "" && !strings.Contains(cfg.GroupKey, "<paste") {
-		dir, err := syncmesh.SyncDir()
-		if err != nil {
-			log.Printf("sync dir unavailable: %v", err)
-		} else {
-			log.Printf("sync folder: %s", dir)
-			local, err := syncmesh.NewLocal(dir, lanip.Hostname(), disc.Self().ID)
-			if err != nil {
-				log.Printf("sync scan failed: %v", err)
-			} else {
-				srv.Sync = local
-				act.Add(activity.KindInfo, "sync folder: "+dir)
-				puller := &syncmesh.Puller{GroupKey: cfg.GroupKey, Logf: logx.Adapter(logx.LevelInfo, "sync"), Act: act, Space: space}
-				syncRunner := &syncmesh.Runner{
-					Local:    local,
-					Puller:   puller,
-					GroupKey: cfg.GroupKey,
-					Peers: func() []syncmesh.PeerRef {
-						var out []syncmesh.PeerRef
-						lanSeen := map[string]bool{}
-						for _, m := range disc.Table().List() {
-							if m.ID == disc.Self().ID {
-								continue
-							}
-							lanSeen[m.ID] = true
-							out = append(out, syncmesh.PeerRef{
-								Host:     net.JoinHostPort(m.IP, fmt.Sprintf("%d", m.Port)),
-								EngineID: m.ID,
-								Name:     m.Name,
-							})
-						}
-						// Internet mesh (M2 step ②): hub devices join
-						// the peer list over the WebRTC tunnel unless
-						// they are already visible on the LAN (the
-						// local route always wins — step ④ adds
-						// proper probing and per-peer toggles).
-						if tunnelMgr != nil && hubClient != nil {
-							selfID := disc.Self().ID
-							for _, d := range hubClient.Status().Devices {
-								if d.ID == selfID || d.ID == deviceID || lanSeen[d.ID] {
-									continue
-								}
-								out = append(out, syncmesh.PeerRef{
-									Host:     tunnel.HostFor(d.ID),
-									EngineID: d.ID,
-									Name:     d.Name,
-									Client:   tunnelMgr.HTTPClient(d.ID),
-								})
-							}
-						}
-						return out
-					},
-					Logf: logx.Adapter(logx.LevelInfo, "sync"),
-					Act:  act,
-				}
-				go syncRunner.Run(syncStop)
-			}
-		}
-	}
+	// Mesh runtime (M2): LAN discovery + hub/tunnel + sync runner,
+	// built per group key. The dashboard can replace the key at
+	// runtime (POST /api/key) — the mesh is stopped and rebuilt live,
+	// no engine restart. One instance lives at a time (keyApplier).
+	applier := &keyApplier{cfgPath: cfgPath, deps: meshDeps{
+		cfg:      cfg,
+		ident:    ident,
+		deviceID: deviceID,
+		name:     lanip.Hostname(),
+		port:     cfg.Port,
+		srv:      srv,
+		act:      act,
+		space:    space,
+		local:    local,
+		handler:  handler,
+	}}
+	applier.rekey(cfg.GroupKey)
+	srv.OnKey = applier.Stage
 
 	// Phone→PC push (M1, PROTOCOL.md §4 upload table): RAM-only upload
 	// sessions, gated by the upload key minted via /api/upload/new.
@@ -388,9 +333,6 @@ func run(portFlag int, bindFlag string) error {
 		}
 	}()
 
-	// Discovery beacons (#5/#7) — announce + listen until shutdown.
-	go func() { disc.Run() }()
-
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.Serve(ln) }()
 
@@ -409,7 +351,8 @@ func run(portFlag int, bindFlag string) error {
 
 	// #4: open the dashboard in the default browser when we run in a
 	// desktop session; headless (SSH/service/container) just prints.
-	if lanip.HasGUI() {
+	// --no-browser skips it (servers, remote desktops, scripts).
+	if !noBrowser && lanip.HasGUI() {
 		if err := openBrowser(url); err != nil {
 			log.Printf("browser open failed (%v) — open %s manually", err, url)
 		} else {
@@ -430,11 +373,7 @@ func run(portFlag int, bindFlag string) error {
 		}
 	}
 	close(reapStop)
-	close(syncStop)
-	disc.Close()
-	if hubStop != nil {
-		hubStop()
-	}
+	applier.stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
@@ -446,15 +385,215 @@ func itoa(p int) string {
 	return fmt.Sprintf("%d", p)
 }
 
-// hubDisableReason explains why the internet mesh is off (log line).
-func hubDisableReason(identErr error, groupKey string) string {
-	switch {
-	case identErr != nil:
-		return "no device identity"
-	case groupKey == "":
-		return "no group key"
-	default:
-		return "unknown"
+// keyOK reports whether k is a usable group key (set and not the
+// first-run placeholder). Deliberately looser than config.ValidKey
+// (which gates NEW dashboard-submitted keys): a legacy hand-written
+// key with a space must keep working.
+func keyOK(k string) bool {
+	return k != "" && !strings.Contains(k, "<paste")
+}
+
+// meshDeps is everything the mesh runtime needs that does NOT change
+// on a live rekey: identity, engine config (hub/stun URLs), server
+// wiring, the shared-folder state and the disk-space ledger.
+type meshDeps struct {
+	cfg      config.Config
+	ident    *device.Identity
+	deviceID string
+	name     string
+	port     int
+	srv      *api.Server
+	act      *activity.Log
+	space    diskspace.Ledger
+	local    *syncmesh.Local
+	handler  http.Handler
+}
+
+// meshRuntime is one live mesh incarnation: the discovery service,
+// the hub/tunnel pair (when configured) and the syncmesh runner —
+// all keyed by one group key. Built by startMesh, torn down by stop.
+type meshRuntime struct {
+	disc      *discovery.Service
+	hub       *hubclient.Client
+	tunnelMgr *tunnel.Manager
+	tunnelSrv *http.Server
+	stopFn    func() // extra teardown (the sync runner), chained first
+}
+
+// stop unwinds the incarnation: sync runner, hub/tunnel, discovery.
+func (m *meshRuntime) stop() {
+	if m.stopFn != nil {
+		m.stopFn()
+	}
+	if m.hub != nil {
+		_ = m.tunnelSrv.Close()
+		m.tunnelMgr.Close()
+		m.hub.Stop()
+	}
+	m.disc.Close()
+}
+
+// startMesh builds one mesh incarnation for a group key and starts
+// it: discovery beacons go out, the hub client (re)connects, the
+// syncmesh runner starts polling. Replacing the key = stop the old
+// incarnation, start a new one (keyApplier.rekey).
+func startMesh(key string, d meshDeps) *meshRuntime {
+	m := &meshRuntime{}
+
+	// LAN discovery (#5/#7): UDP broadcast beacons authenticated by
+	// an HMAC of the group key; inactive when no key is configured.
+	m.disc = discService(key, d.deviceID, d.name, d.port)
+	d.srv.SetDiscovery(m.disc)
+	go func() { m.disc.Run() }()
+
+	// Hub connection (M2 step ①): online presence of the internet
+	// mesh. Optional (hub_url empty = off); LAN behavior is unchanged.
+	// The client reconnects forever on its own with backoff.
+	if d.cfg.HubURL != "" && keyOK(key) && d.ident != nil {
+		m.hub = hubclient.New(d.cfg.HubURL, key, d.ident, logx.Adapter(logx.LevelInfo, "hub"))
+		// m.tunnelMgr is the M2 step ② WebRTC tunnel: DataChannels
+		// carrying the mesh HTTP protocol to hub peers.
+		m.tunnelMgr = tunnel.New(d.deviceID, d.cfg.StunURL, m.hub.SendSignal)
+		m.tunnelMgr.Logf = logx.Adapter(logx.LevelInfo, "tunnel")
+		m.hub.OnSignal = m.tunnelMgr.SignalIn
+		m.hub.Start()
+		// The tunnel's listener serves the same mesh handler a LAN
+		// peer would hit: identical requests, different transport.
+		m.tunnelSrv = &http.Server{
+			Handler:           d.handler,
+			ReadHeaderTimeout: 15 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+		}
+		go m.tunnelSrv.Serve(m.tunnelMgr.Listener())
+		d.srv.SetHub(m.hub)
+		log.Printf("hub: %s — internet mesh on", d.cfg.HubURL)
+	} else if d.cfg.HubURL != "" {
+		log.Printf("hub: %s configured but unavailable (no group key yet) — internet mesh off", d.cfg.HubURL)
+	}
+
+	// Shared-folder auto-transfer (#6): only when a key is configured
+	// (the mesh is group-key gated — syncmesh never trusts strangers).
+	if keyOK(key) && d.local != nil {
+		puller := &syncmesh.Puller{GroupKey: key, Logf: logx.Adapter(logx.LevelInfo, "sync"), Act: d.act, Space: d.space}
+		runner := &syncmesh.Runner{
+			Local:    d.local,
+			Puller:   puller,
+			GroupKey: key,
+			Peers:    func() []syncmesh.PeerRef { return peerRefs(m, d) },
+			Logf:     logx.Adapter(logx.LevelInfo, "sync"),
+			Act:      d.act,
+		}
+		syncStop := make(chan struct{})
+		go runner.Run(syncStop)
+		prev := m.stopFn
+		m.stopFn = func() {
+			close(syncStop)
+			if prev != nil {
+				prev()
+			}
+		}
+	}
+	return m
+}
+
+// peerRefs builds the syncmesh peer list: LAN beacons first (the
+// local route always wins — step ④ adds proper probing and per-peer
+// toggles), then hub devices join over the WebRTC tunnel unless they
+// are already visible on the LAN. Beacons carry the persistent device
+// ID, the same string the hub presence uses — the join is exact.
+func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
+	var out []syncmesh.PeerRef
+	lanSeen := map[string]bool{}
+	for _, mem := range m.disc.Table().List() {
+		if mem.ID == m.disc.Self().ID {
+			continue
+		}
+		lanSeen[mem.ID] = true
+		out = append(out, syncmesh.PeerRef{
+			Host:     net.JoinHostPort(mem.IP, fmt.Sprintf("%d", mem.Port)),
+			EngineID: mem.ID,
+			Name:     mem.Name,
+		})
+	}
+	if m.hub != nil && m.tunnelMgr != nil {
+		for _, dev := range m.hub.Status().Devices {
+			if dev.ID == m.disc.Self().ID || dev.ID == d.deviceID || lanSeen[dev.ID] {
+				continue
+			}
+			out = append(out, syncmesh.PeerRef{
+				Host:     tunnel.HostFor(dev.ID),
+				EngineID: dev.ID,
+				Name:     dev.Name,
+				Client:   m.tunnelMgr.HTTPClient(dev.ID),
+			})
+		}
+	}
+	return out
+}
+
+// keyDebounce is the dashboard's change-of-mind window: keys land in
+// engine.toml (and the mesh rekeys) only after the typing has stopped
+// for this long — correcting a typo must not kick the whole mesh.
+const keyDebounce = 20 * time.Second
+
+// keyApplier stages dashboard-submitted group keys and applies the
+// last one after the debounce: persist to engine.toml (comments and
+// other settings preserved), then rebuild the mesh live. Exactly one
+// incarnation is alive at a time; the engine shuts it down on exit.
+type keyApplier struct {
+	cfgPath string
+	deps    meshDeps
+
+	mu    sync.Mutex
+	timer *time.Timer
+	cur   *meshRuntime
+}
+
+// Stage records a submitted key and (re)starts the debounce window.
+// Called from the HTTP handler (POST /api/key) — fast, no I/O.
+func (k *keyApplier) Stage(key string) {
+	if os.Getenv(config.DefaultGroupKeyEnv) != "" {
+		log.Printf("note: %s is set — it overrides engine.toml on the next restart",
+			config.DefaultGroupKeyEnv)
+	}
+	log.Printf("dashboard: new group key staged — applying in ~%ds (keep typing to change your mind)",
+		int(keyDebounce.Seconds()))
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.timer != nil {
+		k.timer.Stop()
+	}
+	k.timer = time.AfterFunc(keyDebounce, func() {
+		if err := config.SaveGroupKey(k.cfgPath, key); err != nil {
+			log.Printf("group key persist failed: %v (applying live anyway — a restart will revert it)", err)
+		}
+		log.Printf("group key updated from dashboard — rekeying the mesh")
+		k.rekey(key)
+	})
+}
+
+// rekey swaps the mesh incarnation under the lock (also the initial
+// build; cur == nil then).
+func (k *keyApplier) rekey(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.deps.srv.SetGroupKey(key)
+	if k.cur != nil {
+		k.cur.stop()
+	}
+	k.cur = startMesh(key, k.deps)
+}
+
+// stop tears the current incarnation down (engine shutdown).
+func (k *keyApplier) stop() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.timer != nil {
+		k.timer.Stop()
+	}
+	if k.cur != nil {
+		k.cur.stop()
+		k.cur = nil
 	}
 }
 
@@ -493,14 +632,13 @@ func (pickerAdapters) PickFolder() ([]string, error) { return picker.Folder() }
 // the syncmesh goroutine calls Self/Table unconditionally, and a
 // zero-value Service would nil-panic there (two engines on one
 // machine is the normal second-instance case: the second bind fails).
-// The device ID comes from the persistent identity — an empty
-// fallback ID keeps the keyless case harmless (nothing joins the
-// mesh).
-func discService(cfg config.Config, id, name string, port int) *discovery.Service {
-	if cfg.GroupKey == "" || strings.Contains(cfg.GroupKey, "<paste") {
+// The device ID comes from the persistent identity — beacons carry
+// it, so the LAN identity always matches the hub identity (M2).
+func discService(key, id, name string, port int) *discovery.Service {
+	if !keyOK(key) {
 		return inactiveDisc(id, name, port)
 	}
-	s, err := discovery.NewService(cfg.GroupKey, id, name, port)
+	s, err := discovery.NewService(key, id, name, port)
 	if err != nil {
 		log.Printf("discovery unavailable: %v (sync + peers panel off)", err)
 		return inactiveDisc(id, name, port)

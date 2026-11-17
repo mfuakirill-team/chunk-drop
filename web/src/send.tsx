@@ -43,6 +43,11 @@ export function SendPage({ onStart, onChange }: Props) {
   const [zip, setZip] = useState(false);
   // #2: persisted group key; #3: plain input, not a password field.
   const [groupKey, setGroupKey] = useState(loadGroupKey);
+  // M2: the key is not just a browser note anymore — it is staged for
+  // the engine (POST /api/key), which applies it ~20 s after the last
+  // change (written to engine.toml, mesh rekeyed live).
+  const [keyStatus, setKeyStatus] = useState("");
+  const keyTimer = useRef<number | null>(null);
   const [started, setStarted] = useState<StartResponse | null>(null);
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [err, setErr] = useState("");
@@ -53,7 +58,35 @@ export function SendPage({ onStart, onChange }: Props) {
 
   const setKeyAndSave = (k: string) => {
     setGroupKey(k);
-    saveGroupKey(k);
+    setKeyStatus("");
+    // 20 s is the engine's change-of-mind window; here a shorter
+    // debounce just avoids a POST per keystroke.
+    if (keyTimer.current !== null) clearTimeout(keyTimer.current);
+    keyTimer.current = window.setTimeout(async () => {
+      const prev = loadGroupKey();
+      if (!k || k === prev) return;
+      try {
+        // The CURRENT engine key authenticates the change (it is the
+        // dashboard credential); first run has none — local-only gate.
+        const r = await fetch("/api/key", {
+          method: "POST",
+          headers: { [KEY_HEADER]: prev },
+          body: JSON.stringify({ key: k }),
+        });
+        if (r.ok) {
+          saveGroupKey(k);
+          setKeyStatus("engine applies this key in ~20 s (saved to engine.toml, mesh rekeyed)");
+        } else if (r.status === 401) {
+          setKeyStatus("engine rejected the change — wrong current group key");
+        } else if (r.status === 400) {
+          setKeyStatus("invalid key — 8+ printable characters, no spaces or quotes");
+        } else {
+          setKeyStatus(`engine did not accept the key (HTTP ${r.status})`);
+        }
+      } catch {
+        setKeyStatus("engine unreachable — key kept in this browser only");
+      }
+    }, 800);
   };
 
   useEffect(() => {
@@ -230,11 +263,12 @@ export function SendPage({ onStart, onChange }: Props) {
         <p>
           <input
             type="text"
-            placeholder="group key (engine keygen) — saved in this browser"
+            placeholder="group key — engine applies it (engine.toml) ~20 s after you stop typing"
             value={groupKey}
             onInput={(e) => setKeyAndSave((e.target as HTMLInputElement).value)}
           />
         </p>
+        {keyStatus && <p class="muted" style="margin:2px 0">{keyStatus}</p>}
         <p>
           <button disabled={busy || !!started} onClick={start}>
             {busy ? "Hashing…" : "Start transfer"}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // BroadcastPort is the UDP port discovery beacons are sent to (fixed,
@@ -54,31 +55,94 @@ func Candidates() ([]Candidate, error) {
 
 // Pick returns the most plausible single LAN candidate (RFC1918
 // 10/192.168 first, then 172.16-31, then any IPv4), or nil when none.
+//
+// Windows machines routinely expose extra "local only" adapters
+// (Hyper-V/WSL virtual switches, TAP devices, docker bridges) that
+// have no default gateway and cannot reach anything. To avoid picking
+// one of those, the OS default route is probed (DefaultRouteIP) — the
+// interface the OS itself would use to reach other devices wins with
+// a wide margin — and virtual-sounding adapter names are penalized.
 func Pick(cands []Candidate) *Candidate {
+	return pick(cands, DefaultRouteIP())
+}
+
+func pick(cands []Candidate, via string) *Candidate {
 	if len(cands) == 0 {
 		return nil
 	}
-	pref := func(ip string) int {
-		p := net.ParseIP(ip)
+	pref := func(c Candidate) int {
+		p := net.ParseIP(c.IP)
 		if p == nil || p.To4() == nil {
 			return 0
 		}
 		b := p.To4()
+		s := 0
 		switch {
 		case b[0] == 10, b[0] == 192 && b[1] == 168:
-			return 2
+			s = 2
 		case b[0] == 172 && b[1] >= 16 && b[1] <= 31:
-			return 1
+			s = 1
 		}
-		return 0
+		if via != "" && c.IP == via {
+			// The adapter the OS routes internet traffic through —
+			// this is the "configured, reaches other devices" one.
+			s += 100
+		}
+		if virtualAdapter(c.Interface) {
+			// Local-only virtual adapters: demote, don't drop — on a
+			// machine with ONLY a virtual adapter it must still win.
+			s -= 10
+		}
+		return s
 	}
 	best := -1
 	for i := range cands {
-		if best == -1 || pref(cands[i].IP) > pref(cands[best].IP) {
+		if best == -1 || pref(cands[i]) > pref(cands[best]) {
 			best = i
 		}
 	}
 	return &cands[best]
+}
+
+// virtualAdapters are name fragments of adapters that are typically
+// local-only (no gateway): virtual switches, VPN/TAP devices and
+// container bridges. Matched case-insensitively against the adapter
+// name; a match only demotes a candidate (see pick).
+var virtualAdapters = []string{
+	"vethernet", "wsl", "hyper-v", "virtual", "vbox", "vmware",
+	"docker", "veth", "virbr", "loopback", "tap", "tun", "vpn",
+	"tailscale", "zerotier", "hamachi", "ppp",
+}
+
+func virtualAdapter(name string) bool {
+	n := strings.ToLower(name)
+	for _, frag := range virtualAdapters {
+		if strings.Contains(n, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultRouteIP returns the local IPv4 address the OS would use to
+// reach the internet — established via a UDP "connection" to public
+// resolvers (no packet is actually sent; UDP connect just asks the
+// routing table). Empty when there is no working default route. This
+// is the adapter that is *configured* — it has a gateway — unlike the
+// local-only virtual adapters Windows likes to expose.
+func DefaultRouteIP() string {
+	for _, target := range []string{"8.8.8.8:80", "1.1.1.1:80", "9.9.9.9:80"} {
+		conn, err := net.DialTimeout("udp", target, time.Second)
+		if err != nil {
+			continue // no route to this resolver; try the next
+		}
+		host, _, err := net.SplitHostPort(conn.LocalAddr().String())
+		_ = conn.Close()
+		if err == nil && host != "" && net.ParseIP(host) != nil {
+			return host
+		}
+	}
+	return ""
 }
 
 func isPrivateLAN(ip string) bool {

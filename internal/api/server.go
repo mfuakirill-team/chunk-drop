@@ -7,6 +7,7 @@ package api
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"chunkdrop/internal/activity"
@@ -40,19 +41,12 @@ const (
 type Server struct {
 	Sessions *session.Manager
 
-	// GroupKey (engine config) gates session creation and all
-	// engine-to-engine routes (pick, sync, discovery view).
-	GroupKey string
-
 	// UI serves the embedded web app (nil = no embedded UI yet).
 	UI http.Handler
 
 	// Picker opens native file dialogs on the engine (#1). Injected,
 	// nil disables the pick endpoints (paste-paths still works).
 	Picker Picker
-
-	// Discovery lists LAN peers for the dashboard panel (#7).
-	Discovery PeersSource
 
 	// Sync is this engine's shared folder (auto-transfer, #6).
 	Sync *syncmesh.Local
@@ -73,15 +67,62 @@ type Server struct {
 	// Nil = events are dropped (callers need no guards).
 	Activity *activity.Log
 
-	// Hub is the M2 hub connection (internet mesh presence); nil =
-	// no hub configured (hub_url empty) and /api/hub says so.
-	Hub *hubclient.Client
-
 	// AllowRemoteDashboard disables the local-only guard on the
 	// dashboard/control routes (engine.toml: allow_remote_dashboard).
 	// Default false: only this machine may control the PC; receiving
 	// links from other devices keep working either way.
 	AllowRemoteDashboard bool
+
+	// OnKey receives a validated group key submitted via POST /api/key
+	// (dashboard sets the key, M2). nil = the endpoint reports disabled.
+	// Called synchronously; the receiver owns debouncing/persistence.
+	OnKey func(key string)
+
+	// mu guards the live-swappable mesh state below: the dashboard
+	// group key can be replaced at runtime (POST /api/key), which
+	// swaps the discovery service and hub client under a running
+	// HTTP server.
+	mu        sync.RWMutex
+	groupKey  string
+	discovery PeersSource
+	hub       HubSource
+}
+
+// HubSource is the read side of the hub connection the server needs
+// (/api/hub status + /api/peers presence). Satisfied by
+// *hubclient.Client; stubbed in tests.
+type HubSource interface {
+	Status() hubclient.Status
+}
+
+// SetGroupKey swaps the group key all dashboard routes authenticate
+// with (live rekey, M2).
+func (s *Server) SetGroupKey(k string) {
+	s.mu.Lock()
+	s.groupKey = k
+	s.mu.Unlock()
+}
+
+// GroupKey snapshots the current group key.
+func (s *Server) GroupKey() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.groupKey
+}
+
+// SetDiscovery swaps the discovery source (live rekey builds a new
+// service; the old one stops announcing).
+func (s *Server) SetDiscovery(p PeersSource) {
+	s.mu.Lock()
+	s.discovery = p
+	s.mu.Unlock()
+}
+
+// SetHub swaps the hub client (live rekey; nil = internet mesh off).
+func (s *Server) SetHub(c HubSource) {
+	s.mu.Lock()
+	s.hub = c
+	s.mu.Unlock()
 }
 
 // Picker abstracts the native dialog surface (internal/picker).
@@ -151,6 +192,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/activity", s.localOnly(s.authStart(s.handleActivity)))
 	mux.HandleFunc("GET /api/sync/state", s.authStart(s.handleSyncState))
 	mux.HandleFunc("POST /api/sync/start", s.authStart(s.handleSyncStart))
+
+	// Dashboard sets the group key (M2): local-only; when a key is
+	// already configured, the current key must be presented (it is the
+	// dashboard credential — a key change must not be drive-by).
+	mux.Handle("POST /api/key", s.localOnly(http.HandlerFunc(s.handleKeySet)))
 
 	// Phone→PC push (M1, PROTOCOL.md §4 upload table). Slot creation
 	// is dashboard control (local-only + group key); the upload itself

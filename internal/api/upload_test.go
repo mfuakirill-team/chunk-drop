@@ -29,7 +29,7 @@ import (
 func newUploadTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	srv := NewServer(session.NewManager(), nil)
-	srv.GroupKey = "group-secret-group-secret-group!!"
+	srv.SetGroupKey("group-secret-group-secret-group!!")
 	dest := t.TempDir()
 	srv.Uploads = upload.NewManager()
 	srv.UploadDest = dest
@@ -60,7 +60,7 @@ func TestUploadNewLocalOnly(t *testing.T) {
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/upload/new", nil)
-	req.Header.Set(HeaderKey, srv.GroupKey)
+	req.Header.Set(HeaderKey, srv.GroupKey())
 	req.RemoteAddr = "192.0.2.50:5000" // another device
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -189,11 +189,11 @@ func TestUploadClose(t *testing.T) {
 	h := srv.Handler()
 	id, key := newSlot(t, h)
 
-	if rec := reqKeyBody(t, h, http.MethodPost, "/api/upload/close", srv.GroupKey, `{"key":"`+key+`"}`); rec.Code != http.StatusOK {
+	if rec := reqKeyBody(t, h, http.MethodPost, "/api/upload/close", srv.GroupKey(), `{"key":"`+key+`"}`); rec.Code != http.StatusOK {
 		t.Fatalf("close = %d: %s", rec.Code, rec.Body.String())
 	}
 	// A wrong link key reports not-closed without touching anything.
-	rec := reqKeyBody(t, h, http.MethodPost, "/api/upload/close", srv.GroupKey, `{"key":"not-a-real-key"}`)
+	rec := reqKeyBody(t, h, http.MethodPost, "/api/upload/close", srv.GroupKey(), `{"key":"not-a-real-key"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("close (unknown key) = %d: %s", rec.Code, rec.Body.String())
 	}

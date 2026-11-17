@@ -2,12 +2,13 @@ package api
 
 import (
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"chunkdrop/internal/activity"
+	"chunkdrop/internal/hubclient"
+	"chunkdrop/internal/lanip"
 	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/transfer"
 )
@@ -45,28 +46,73 @@ func (s *Server) handlePickFolder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"paths": paths})
 }
 
-// handlePeers lists discovered LAN engines (#7 dashboard panel).
+// handlePeers lists mesh clients for the dashboard "Clients" panel
+// (#7): LAN-discovered engines (beacons carry the persistent device
+// ID, so the two sources join by it) merged with the hub's online
+// devices. The "hub" flag marks clients that are reachable over the
+// internet — the UI shows them with a globe; hub-only ones have no
+// LAN ip, so they are shown by the first characters of their ID.
 func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	self := map[string]any{"id": "", "name": "", "ip": "", "port": 0, "self": true}
-	var peers []map[string]any
-	if s.Discovery != nil {
-		b := s.Discovery.Self()
+	peers := []map[string]any{}
+	idx := map[string]map[string]any{}
+	if d := s.discoverySnapshot(); d != nil {
+		b := d.Self()
 		self = map[string]any{
 			"id": b.ID, "name": b.Name, "ip": localIP(), "port": b.Port, "self": true,
 		}
-		for _, m := range s.Discovery.Table().List() {
-			peers = append(peers, map[string]any{
+		for _, m := range d.Table().List() {
+			row := map[string]any{
 				"id":   m.ID,
 				"name": m.Name,
 				"ip":   m.IP,
 				"port": m.Port,
-			})
+				"hub":  false,
+			}
+			idx[m.ID] = row
+			peers = append(peers, row)
 		}
 	}
-	if peers == nil {
-		peers = []map[string]any{}
+	for _, dev := range s.hubDevices() {
+		if dev.ID == self["id"] {
+			continue // the engine itself — covered by the self row
+		}
+		if row, ok := idx[dev.ID]; ok {
+			row["hub"] = true // reachable BOTH ways; UI shows only the LAN ip + 🌐
+			continue
+		}
+		peers = append(peers, map[string]any{
+			"id":   dev.ID,
+			"name": dev.Name,
+			"ip":   "",
+			"port": 0,
+			"hub":  true,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"self": self, "peers": peers})
+}
+
+// discoverySnapshot returns the current discovery source (nil-safe).
+func (s *Server) discoverySnapshot() PeersSource {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.discovery
+}
+
+// hubSnapshot returns the current hub client (nil-safe).
+func (s *Server) hubSnapshot() HubSource {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hub
+}
+
+// hubDevices snapshots the hub's online device list (nil-safe).
+func (s *Server) hubDevices() []hubclient.Peer {
+	c := s.hubSnapshot()
+	if c == nil {
+		return nil
+	}
+	return c.Status().Devices
 }
 
 // handleSyncState returns this engine's shared-folder announcement
@@ -190,15 +236,8 @@ func (s *Server) liveUploads() []uploadInfo {
 }
 
 func localIP() string {
-	// Best-effort display value for the peers panel.
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err == nil {
-		defer conn.Close()
-		if a := conn.LocalAddr(); a != nil {
-			if host, _, err := net.SplitHostPort(a.String()); err == nil {
-				return host
-			}
-		}
-	}
-	return ""
+	// Best-effort display value for the peers panel: the address the
+	// OS would use to reach the internet (routing-table probe, no
+	// packets sent).
+	return lanip.DefaultRouteIP()
 }

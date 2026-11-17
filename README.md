@@ -40,13 +40,18 @@ make engine-mac       # → bin/engine-darwin-arm64
 
 ### 2. Set the group key (once per machine)
 
+Either set it **in the dashboard** once the engine runs (recommended —
+the engine writes `engine.toml` for you and rekeys live), or by hand:
+
 ```bash
 ./bin/engine-linux-amd64 keygen          # prints a fresh key
 nano ~/.config/chunkdrop/engine.toml     # paste it → group_key = "…"
 ```
 
 On Windows the config is `%APPDATA%\chunkdrop\engine.toml` (use Notepad).
-The engine tells you this on first run — it writes the template itself.
+The engine tells you this on first run — it writes the template itself
+(with the default hub already filled in: internet mesh on out of the
+box).
 
 ### 3. Run it and send
 

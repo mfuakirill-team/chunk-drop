@@ -15,7 +15,7 @@ func TestHubEndpoint(t *testing.T) {
 
 	t.Run("no hub configured", func(t *testing.T) {
 		srv, _, _ := newTestServer(t)
-		srv.GroupKey = "group-secret-group-secret-group!!"
+		srv.SetGroupKey("group-secret-group-secret-group!!")
 		h := srv.Handler()
 		rec := reqKey(t, h, http.MethodGet, "/api/hub", groupKey)
 		if rec.Code != http.StatusOK {
@@ -34,13 +34,13 @@ func TestHubEndpoint(t *testing.T) {
 
 	t.Run("hub configured", func(t *testing.T) {
 		srv, _, _ := newTestServer(t)
-		srv.GroupKey = "group-secret-group-secret-group!!"
+		srv.SetGroupKey("group-secret-group-secret-group!!")
 		id, err := device.LoadOrCreate(t.TempDir(), "test-pc")
 		if err != nil {
 			t.Fatal(err)
 		}
 		// Not started: the endpoint must still answer (disconnected).
-		srv.Hub = hubclient.New("ws://hub.example/hub/ws", groupKey, id, nil)
+		srv.SetHub(hubclient.New("ws://hub.example/hub/ws", groupKey, id, nil))
 		h := srv.Handler()
 		rec := reqKey(t, h, http.MethodGet, "/api/hub", groupKey)
 		if rec.Code != http.StatusOK {
@@ -62,8 +62,8 @@ func TestHubEndpoint(t *testing.T) {
 
 	t.Run("group key required", func(t *testing.T) {
 		srv, _, _ := newTestServer(t)
-		srv.GroupKey = "group-secret-group-secret-group!!"
-		srv.Hub = nil
+		srv.SetGroupKey("group-secret-group-secret-group!!")
+		srv.SetHub(nil)
 		h := srv.Handler()
 		rec := reqKey(t, h, http.MethodGet, "/api/hub", "wrong-key-wrong-key-wrong")
 		if rec.Code != http.StatusUnauthorized {

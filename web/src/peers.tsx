@@ -1,9 +1,10 @@
 import { useEffect, useState } from "preact/hooks";
 
-// Side panel (#7 + #1.3): two separate frames — "LAN clients" (the
-// discovery table with peers' IPs) and, below it, "Activity" (what's
-// uploading / downloading right now + live receiver progress of the
-// running transfer).
+// Side panel (#7 + #1.3): two separate frames — "Clients" (the merged
+// mesh client list: LAN-discovered engines + hub devices, joined by
+// the persistent device ID both sources carry) and, below it,
+// "Activity" (what's uploading / downloading right now + live receiver
+// progress of the running transfer).
 
 import { KEY_HEADER } from "./api";
 import { loadGroupKey } from "./storage";
@@ -16,6 +17,7 @@ interface PeerInfo {
   ip: string;
   port: number;
   self?: boolean;
+  hub?: boolean; // reachable over the internet via the hub
 }
 
 interface PeersResp {
@@ -111,14 +113,21 @@ export function PeersPanel() {
       )
     : [];
 
+  // ip/id cell: a hub-only client has no LAN address — show the first
+  // characters of its device ID instead (full ID in the tooltip). A
+  // 🌐 marks internet reachability (LAN+hub and hub-only alike);
+  // LAN-only clients get neither.
+  const addr = (p: PeerInfo): string =>
+    p.ip ? p.ip : `${p.id.slice(0, 8)}…`;
+
   return (
     <div class="card">
-      <h3 style="margin-top:0">LAN clients</h3>
+      <h3 style="margin-top:0">Clients</h3>
       <table>
         <thead>
           <tr>
             <th>name</th>
-            <th>ip</th>
+            <th>ip/id</th>
             <th class="num">port</th>
           </tr>
         </thead>
@@ -129,20 +138,22 @@ export function PeersPanel() {
                 {p.self ? "★ " : ""}
                 {p.name || p.id.slice(0, 8)}
               </td>
-              <td>{p.ip}</td>
-              <td class="num">{p.port}</td>
+              <td title={p.id}>{addr(p)}{p.hub ? " 🌐" : ""}</td>
+              <td class="num">{p.ip ? p.port : ""}</td>
             </tr>
           ))}
         </tbody>
       </table>
       {peers && peers.peers.length === 0 && (
-        <p class="muted">no other engines found — is the other machine running?</p>
+        <p class="muted">no other clients found — is the other machine running?</p>
       )}
-      {!peers && <p class="muted">discovering LAN clients…</p>}
+      {!peers && <p class="muted">discovering clients…</p>}
       <p class="muted" style="margin-bottom:0">
-        auto-sync: ~/Downloads/chunk-drop-files ↔ other engines (same
-        group key), every 5s. Deletions are signalled to every engine
-        (replayed for 24h to ones that were offline).
+        🌐 = also reachable over the internet (hub). LAN clients sync
+        by IP; internet-only ones by device ID. auto-sync: Downloads ↔
+        other engines (same group key), every 5s. Deletions are
+        signalled to every client (replayed for 24h to ones that were
+        offline).
       </p>
     </div>
   );
