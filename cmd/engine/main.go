@@ -36,6 +36,7 @@ import (
 	"chunkdrop/internal/lanip"
 	"chunkdrop/internal/logx"
 	"chunkdrop/internal/picker"
+	"chunkdrop/internal/relay"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/tunnel"
@@ -409,7 +410,10 @@ type meshRuntime struct {
 	hub       *hubclient.Client
 	tunnelMgr *tunnel.Manager
 	tunnelSrv *http.Server
-	stopFn    func() // extra teardown (the sync runner), chained first
+	relay     *relay.Manager // step ③ fallback: mesh HTTP over the hub WSS
+	relaySrv  *http.Server
+	dial      *remoteDialer // per-peer transport choice (tunnel → relay)
+	stopFn    func()        // extra teardown (the sync runner), chained first
 }
 
 // stop unwinds the incarnation: sync runner, hub/tunnel, discovery.
@@ -418,8 +422,16 @@ func (m *meshRuntime) stop() {
 		m.stopFn()
 	}
 	if m.hub != nil {
-		_ = m.tunnelSrv.Close()
-		m.tunnelMgr.Close()
+		if m.relaySrv != nil {
+			_ = m.relaySrv.Close()
+		}
+		if m.relay != nil {
+			m.relay.Close()
+		}
+		if m.tunnelMgr != nil {
+			_ = m.tunnelSrv.Close()
+			m.tunnelMgr.Close()
+		}
 		m.hub.Stop()
 	}
 	m.disc.Close()
@@ -444,21 +456,45 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 	if d.cfg.HubURL != "" && config.UsableKey(key) && d.ident != nil {
 		m.hub = hubclient.New(d.cfg.HubURL, key, d.ident, logx.Adapter(logx.LevelInfo, "hub"))
 		// m.tunnelMgr is the M2 step ② WebRTC tunnel: DataChannels
-		// carrying the mesh HTTP protocol to hub peers.
-		m.tunnelMgr = tunnel.New(d.deviceID, d.cfg.StunURL, m.hub.SendSignal)
-		m.tunnelMgr.Logf = logx.Adapter(logx.LevelInfo, "tunnel")
-		m.hub.OnSignal = m.tunnelMgr.SignalIn
+		// carrying the mesh HTTP protocol to hub peers. CHUNKDROP_
+		// RELAY_ONLY=1 skips it — diagnosis: force the step ③ relay
+		// path to tell "hub reachable, tunnel broken" apart.
+		if os.Getenv(relayOnlyEnv) == "" {
+			m.tunnelMgr = tunnel.New(d.deviceID, d.cfg.StunURL, m.hub.SendSignal)
+			m.tunnelMgr.Logf = logx.Adapter(logx.LevelInfo, "tunnel")
+			m.hub.OnSignal = m.tunnelMgr.SignalIn
+		}
+		// m.relay is the M2 step ③ fallback: the same mesh HTTP over
+		// the hub's own WSS, for peers the tunnel cannot reach.
+		m.relay = relay.New(d.deviceID, m.hub.SendRelay)
+		m.relay.Logf = logx.Adapter(logx.LevelInfo, "relay")
+		m.hub.OnRelay = m.relay.Deliver
 		m.hub.Start()
 		// The tunnel's listener serves the same mesh handler a LAN
 		// peer would hit: identical requests, different transport.
-		m.tunnelSrv = &http.Server{
+		if m.tunnelMgr != nil {
+			m.tunnelSrv = &http.Server{
+				Handler:           d.handler,
+				ReadHeaderTimeout: 15 * time.Second,
+				IdleTimeout:       2 * time.Minute,
+			}
+			go m.tunnelSrv.Serve(m.tunnelMgr.Listener())
+		}
+		// The relay listener serves the same handler the same way.
+		m.relaySrv = &http.Server{
 			Handler:           d.handler,
 			ReadHeaderTimeout: 15 * time.Second,
 			IdleTimeout:       2 * time.Minute,
 		}
-		go m.tunnelSrv.Serve(m.tunnelMgr.Listener())
+		go m.relaySrv.Serve(m.relay.Listener())
+		// Per-peer transport choice: tunnel first, relay fallback.
+		m.dial = &remoteDialer{tun: m.tunnelMgr, rel: m.relay, logf: logx.Adapter(logx.LevelInfo, "mesh")}
 		d.srv.SetHub(m.hub)
-		log.Printf("hub: %s — internet mesh on", d.cfg.HubURL)
+		if m.tunnelMgr != nil {
+			log.Printf("hub: %s — internet mesh on", d.cfg.HubURL)
+		} else {
+			log.Printf("hub: %s — internet mesh on (relay only: %s is set)", d.cfg.HubURL, relayOnlyEnv)
+		}
 	} else if d.cfg.HubURL != "" {
 		log.Printf("hub: %s configured but unavailable (no group key yet) — internet mesh off", d.cfg.HubURL)
 	}
@@ -490,9 +526,10 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 
 // peerRefs builds the syncmesh peer list: LAN beacons first (the
 // local route always wins — step ④ adds proper probing and per-peer
-// toggles), then hub devices join over the WebRTC tunnel unless they
-// are already visible on the LAN. Beacons carry the persistent device
-// ID, the same string the hub presence uses — the join is exact.
+// toggles), then hub devices join over the tunnel or, when the tunnel
+// cannot connect, the hub relay — both carry the same mesh HTTP.
+// Beacons carry the persistent device ID, the same string the hub
+// presence uses — the join is exact.
 func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 	var out []syncmesh.PeerRef
 	lanSeen := map[string]bool{}
@@ -507,7 +544,7 @@ func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 			Name:     mem.Name,
 		})
 	}
-	if m.hub != nil && m.tunnelMgr != nil {
+	if m.hub != nil && m.dial != nil {
 		for _, dev := range m.hub.Status().Devices {
 			if dev.ID == m.disc.Self().ID || dev.ID == d.deviceID || lanSeen[dev.ID] {
 				continue
@@ -516,11 +553,111 @@ func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 				Host:     tunnel.HostFor(dev.ID),
 				EngineID: dev.ID,
 				Name:     dev.Name,
-				Client:   m.tunnelMgr.HTTPClient(dev.ID),
+				Client:   m.dial.HTTPClient(dev.ID),
 			})
 		}
 	}
 	return out
+}
+
+// relayOnlyEnv forces the hub relay (step ③) and skips the WebRTC
+// tunnel entirely — diagnosis: it answers "does the hub path work"
+// without touching the NAT question. Empty/unset = normal tunnel-first
+// routing.
+const relayOnlyEnv = "CHUNKDROP_RELAY_ONLY"
+
+// remoteDialer picks the transport for one internet peer: the WebRTC
+// DataChannel tunnel first (P2P — the hub sees nothing), then the
+// hub WSS relay when the tunnel cannot connect (M2 step ③). A failed
+// tunnel dial cools the peer down for tunnelCooldown, so a hostile
+// NAT cannot put a doomed ICE attempt in front of every request; the
+// tunnel retries after the cooldown, or immediately once its PC
+// reports connected again. Clients are cached per peer: transport
+// pooling (idle conns) must survive the sync runner's periodic
+// peerRefs rebuilds.
+type remoteDialer struct {
+	tun  *tunnel.Manager // nil = relay-only (relayOnlyEnv set)
+	rel  *relay.Manager
+	logf func(format string, args ...any)
+
+	mu       sync.Mutex
+	cooldown map[string]time.Time
+	clients  map[string]*http.Client
+}
+
+// tunnelCooldown is how long a failed tunnel dial is not retried.
+const tunnelCooldown = 60 * time.Second
+
+// tunnelDialTimeout mirrors the tunnel's own first-connect budget:
+// ensure PC + SDP + DTLS/SCTP + channel open.
+const tunnelDialTimeout = 25 * time.Second
+
+// HTTPClient returns the cached client for one tunnel/relay peer.
+func (d *remoteDialer) HTTPClient(peer string) *http.Client {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.clients == nil {
+		d.clients = map[string]*http.Client{}
+	}
+	if c, ok := d.clients[peer]; ok {
+		return c
+	}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// addr is tunnel.HostFor(peer) — nothing here does DNS.
+			if got, err := tunnel.PeerFromHost(addr); err != nil || got != peer {
+				return nil, fmt.Errorf("mesh: dial for %q, client serves %q", addr, peer)
+			}
+			if d.tun != nil && d.tunnelUsable(peer) {
+				dctx, cancel := context.WithTimeout(ctx, tunnelDialTimeout)
+				conn, err := d.tun.Dial(dctx, peer)
+				cancel()
+				if err == nil {
+					return conn, nil
+				}
+				d.logf("tunnel dial to %.12s… failed (%v) — hub relay takes over", peer, err)
+				d.setCooldown(peer)
+			}
+			return d.rel.Dial(ctx, peer)
+		},
+		MaxConnsPerHost:       2, // announcement + chunk stream headroom
+		MaxIdleConnsPerHost:   2,
+		IdleConnTimeout:       0, // keep-alive conns live as long as the mesh
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
+	c := &http.Client{Transport: tr, Timeout: 120 * time.Second}
+	d.clients[peer] = c
+	return c
+}
+
+// tunnelUsable reports whether a tunnel dial is worth attempting:
+// outside the cooldown, or whenever the PC is (again) connected.
+func (d *remoteDialer) tunnelUsable(peer string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cooldown == nil {
+		return true
+	}
+	at, cooled := d.cooldown[peer]
+	if !cooled || time.Since(at) >= tunnelCooldown {
+		return true
+	}
+	return d.tun.PeerConnected(peer)
+}
+
+// setCooldown records a failed tunnel dial (and prunes old entries).
+func (d *remoteDialer) setCooldown(peer string) {
+	d.mu.Lock()
+	if d.cooldown == nil {
+		d.cooldown = map[string]time.Time{}
+	}
+	for p, at := range d.cooldown {
+		if time.Since(at) > 2*tunnelCooldown {
+			delete(d.cooldown, p)
+		}
+	}
+	d.cooldown[peer] = time.Now()
+	d.mu.Unlock()
 }
 
 // keySaveDelay is the engine.toml write window: the mesh rekeys the

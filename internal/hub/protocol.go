@@ -73,6 +73,28 @@ type Signal struct {
 type Error struct {
 	Type  string `json:"type"` // "error"
 	Error string `json:"error"`
+	// Sid optionally scopes the error to one relay stream (step ③):
+	// the engine aborts exactly that stream instead of guessing.
+	// Zero = connection-level (hello rejects and the like).
+	Sid uint64 `json:"sid,omitempty"`
+}
+
+// Relay pipes one stream frame between two members of the same group
+// (M2 step ③ fallback). The hub is a dumb forwarder: it validates the
+// target, overwrites From with the authenticated sender and re-sends
+// the frame — no per-stream state, no storage. Sid addresses the
+// stream inside the pair; Data carries payload bytes (JSON base64);
+// Eof closes the send direction; Ack is a cumulative "receiver has
+// consumed N payload bytes" flow-control report. Data and Ack never
+// appear in one frame.
+type Relay struct {
+	Type string `json:"type"`           // "relay"
+	To   string `json:"to"`             // target device ID
+	From string `json:"from,omitempty"` // hub→client: authenticated sender
+	Sid  uint64 `json:"sid"`
+	Data []byte `json:"data,omitempty"` // payload chunk (JSON base64)
+	Eof  bool   `json:"eof,omitempty"`  // end of the sender's stream
+	Ack  uint64 `json:"ack,omitempty"`  // cumulative bytes consumed
 }
 
 // itoa avoids importing strconv in a hot path for one call site.

@@ -520,6 +520,24 @@ and it lands then. |
 | Phone picks a folder but files arrive flat | Firefox (some versions) ignores folder picks — it sends files without their folder prefix. Use Chrome/Safari on the phone, or accept the flat batch. |
 | A `hashes/uploads/` folder in the sync folder | That's upload staging — never synced, never announced, auto-cleared. Leave it. |
 
+### 5.12 Internet sync (M2) — how the hub fits in
+
+When two engines share a group key and the configured hub
+(`hub_url`), they find each other over the internet and sync with the
+same behavior as on the LAN. Under the hood the engine always tries
+the **WebRTC tunnel first** (direct device-to-device; the hub sees
+nothing of the traffic). If hole-punching fails (symmetric NAT,
+blocked UDP), transfers fall back to the **hub relay** — the same
+traffic piped through the hub's own websocket, capped near
+80 Mbit/s. Both paths speak the identical mesh protocol; nothing to
+configure.
+
+| Symptom | Cause / fix |
+|---|---|
+| Peer visible in the peers panel but sync stalls | `--debug` shows `tunnel`/`relay` lines: `relay takes over` means the tunnel could not connect and the hub relay is carrying the traffic (slow but working). |
+| Want to test whether the relay path works | Run the engine with `CHUNKDROP_RELAY_ONLY=1` — it skips the tunnel entirely; if sync works then, the hub path is fine and the NAT/tunnel is the problem. |
+| Relay transfers are slow | Expected: everything goes through the VPS (~80 Mbit/s ceiling at a 50 ms RTT, shared with signaling). It is a fallback, not the default route. |
+
 ---
 
 ## 6. What's safe / what to keep private
@@ -599,9 +617,9 @@ browser, and the exact step from this guide.
 | PWA install (iOS Safari, Android Chrome/Firefox) | ✅ M0.2 |
 | Activity as a separate frame below the Clients card | ✅ M0.2 |
 | Engine in Docker (LAN machine, deploy/) | ❌ removed in M2 — engine is a plain binary (§3.1) |
-| VPS hub: presence + WebRTC signaling (relay fallback ⬜) | ✅ step ② (`DEPLOY-VPS.md`) |
+| VPS hub: presence + WebRTC signaling + WSS relay fallback | ✅ step ③ (`DEPLOY-VPS.md`) |
 | Upload direction (phone → PC) | ⬜ M1 |
-| Internet mode via VPS hub | ⬜ M2 |
+| Internet mode via VPS hub | ✅ M2 steps ①–③ (presence, tunnel, relay fallback) |
 | Resume-after-close for receivers | ⬜ M3 |
 | Real-device test matrix (iPhone/Android/Windows engines) | ⬜ needs hardware |
 | Service worker / offline caching | ⬜ deliberately none (§4.9) |

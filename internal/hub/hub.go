@@ -271,8 +271,9 @@ func validateHello(h *Hello) error {
 
 // handleFrame dispatches one client frame. Presence needs no client
 // input; "sdp"/"ice" are WebRTC signaling (M2 step ②) relayed inside
-// the sender's group; unknown types are dropped, never fatal (forward
-// compatibility: older hub + newer engine).
+// the sender's group; "relay" pipes one fallback-stream frame (step
+// ③); unknown types are dropped, never fatal (forward compatibility:
+// older hub + newer engine).
 func (s *Server) handleFrame(c *conn, data []byte) {
 	var m struct {
 		Type string `json:"type"`
@@ -283,6 +284,8 @@ func (s *Server) handleFrame(c *conn, data []byte) {
 	switch m.Type {
 	case "sdp", "ice":
 		s.relay(c, data, m.Type)
+	case "relay":
+		s.relayStream(c, data)
 	default:
 		s.logf("frame %q from %s: not handled yet", m.Type, c.id)
 	}
@@ -325,6 +328,51 @@ func (s *Server) relay(c *conn, data []byte, typ string) {
 	}
 	_ = target.write(fwd)
 	s.logf("relay: %s %s→%s", typ, c.id, sig.To)
+}
+
+// maxRelayData caps one relay frame's payload (see internal/relay:
+// streams chunk at 30 KiB, so 32 KiB has headroom). The wire frame
+// (JSON base64) stays far below MaxReadLimit either way.
+const maxRelayData = 32 << 10
+
+// relayStream forwards one fallback-stream frame to its target device
+// inside the sender's group. Fully stateless: the hub forwards the
+// frame verbatim (From rewritten authoritatively) and forgets it —
+// flow control lives end-to-end in the engines (internal/relay
+// sliding window), so the hub never queues or stores stream data. A
+// write error to the target (stalled or dead socket) is reported back
+// to the sender as a stream-scoped error frame: the sender aborts
+// that one stream, everything else keeps flowing.
+func (s *Server) relayStream(c *conn, data []byte) {
+	var f Relay
+	if err := json.Unmarshal(data, &f); err != nil {
+		return
+	}
+	if len(f.To) != 64 || !isHex(f.To) || len(f.Data) > maxRelayData {
+		s.logf("relay stream from %s: bad frame", c.id)
+		return
+	}
+	s.mu.Lock()
+	g := s.clients[c.tag]
+	var target *conn
+	if g != nil {
+		target = g.conns[f.To]
+	}
+	s.mu.Unlock()
+	if target == nil || target == c {
+		errData, _ := json.Marshal(Error{Type: "error", Error: "relay target offline", Sid: f.Sid})
+		_ = c.write(errData)
+		return
+	}
+	fwd, err := json.Marshal(Relay{Type: "relay", To: f.To, From: c.id, Sid: f.Sid, Data: f.Data, Eof: f.Eof, Ack: f.Ack})
+	if err != nil {
+		return
+	}
+	if err := target.write(fwd); err != nil {
+		errData, _ := json.Marshal(Error{Type: "error", Error: "relay target stalled", Sid: f.Sid})
+		_ = c.write(errData)
+		return
+	}
 }
 
 // join inserts/updates the device and broadcasts the new presence to

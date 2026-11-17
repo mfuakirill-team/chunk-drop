@@ -264,7 +264,10 @@ the rest additive):
   `error` frame. Non-trickle ICE: candidates ride inside the SDP, one
   exchange per direction — no ICE candidate flood.
 - `error` (hub→client): sent before the hub closes a connection it
-  rejects.
+  rejects (connection-level, `sid` unset). Also stream-scoped for the
+  relay fallback: the hub could not forward a `relay` frame (offline
+  or stalled target) — `sid` names the stream to abort, the
+  connection stays up.
 
 The hub is stateless and RAM-only: no disk writes, no secrets, sessions
 expire after 24 h. Device identity is a per-device Ed25519 key at
@@ -281,11 +284,45 @@ exact same endpoints LAN peers use. SCTP message size (65536) bounds
 the write granularity (16 KiB chunks); backpressure applies above
 1 MiB of unacked channel data. The hub sees none of this traffic.
 
-### Relay fallback (step ③ — provisional)
+### Relay fallback (implemented, step ③)
 
-If ICE fails, transfers fall back to the hub's own WSS relay (capped
-at 80 Mbit/s), again carrying the same HTTP protocol. The bytes stay
-under the engine's TLS session to the hub (`SECURITY.md` §5).
+If ICE fails (symmetric NAT, blocked UDP — anywhere the hub's own
+socket gets through), transfers fall back to the hub's own WSS relay,
+again carrying the same HTTP protocol. New `relay` frames
+(`internal/hub/protocol.go`): `to` = target device ID, `sid` = stream
+ID, and either `data` (JSON base64 payload, ≤ 32 KiB per frame) / `eof`
+(send direction closed) or `ack` (cumulative "receiver consumed N
+bytes" flow-control report). The hub is a dumb stateless forwarder: it
+validates the target, overwrites `from` with the authenticated sender,
+and re-sends the frame inside the sender's group — no per-stream
+state, no storage. A write to a dead/stalled target answers a
+stream-scoped `error` frame (`sid` set; `sid` 0 = connection-level
+error, e.g. a hello reject).
+
+Engine side (`internal/relay`), the tunnel's shape mirrored one more
+time: `http.Transport.DialContext` → relay stream on the dialer;
+`net.Listener` → relay streams on the accepter, both served by the
+same mesh handler. Stream IDs come from two disjoint namespaces (the
+lexicographically larger device ID dials on odd `sid`s), so
+simultaneous opposite dials cannot collide. Flow control is
+end-to-end: the sender keeps at most 512 KiB un-acked per stream, the
+receiver acks what its consumer has actually read — that bounds RAM at
+every hop (dialer ≤ window, hub ≈ socket buffers, accepter ≤ a window
+of un-acked bytes) and caps a stream near window/RTT: **512 KiB at a
+50 ms hub RTT ≈ 80 Mbit/s**, the documented relay ceiling. Failsafes:
+a stream whose acks stop for 15 s is aborted; idle streams are reaped
+after 3 min.
+
+Routing: the engine always dials the tunnel first (P2P — the hub sees
+nothing of a working tunnel); a failed tunnel dial cools that peer
+down for 60 s and the relay takes over, with an instant tunnel retry
+once its peer connection reports connected again.
+`CHUNKDROP_RELAY_ONLY=1` skips the tunnel entirely (diagnosis:
+"hub reachable, tunnel broken" without touching the NAT question).
+The relay is an unauthenticated transport exactly like the tunnel —
+the mesh protocol's group-key checks carry the trust boundary; the
+bytes stay under the engine's TLS session to the hub (`SECURITY.md`
+§5).
 
 ## 6. Resume state (M3 — provisional)
 

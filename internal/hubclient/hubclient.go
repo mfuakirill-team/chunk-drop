@@ -66,6 +66,12 @@ type Client struct {
 	// nil = dropped. Handlers must not block on signaling replies —
 	// the read loop serializes all inbound frames.
 	OnSignal func(from, typ, side string, body json.RawMessage)
+	// OnRelay fires (on the read loop, in order) for each relayed
+	// stream frame (step ③ fallback): from = authenticated sender
+	// device ID ("" when the frame is a hub error scoped to a stream),
+	// f = the frame with Data/Eof/Ack. nil = dropped. The handler must
+	// never block: the read loop also carries presence and signaling.
+	OnRelay func(from string, f hub.Relay)
 	// Logf renders a line; nil = silent (the caller wires logx).
 	Logf func(format string, args ...any)
 
@@ -295,6 +301,32 @@ func (c *Client) SendSignal(to, side, typ string, body any) error {
 	return ws.Write(wctx, websocket.MessageText, frame)
 }
 
+// SendRelay sends one stream frame to a device via the hub (step ③
+// fallback relay): to = target device ID, f = the frame (Sid, Data/
+// Eof/Ack). Serialized with every other client write (one writer per
+// socket); fails when the socket is down — stream callers treat that
+// as stream death.
+func (c *Client) SendRelay(to string, f hub.Relay) error {
+	f.Type = "relay"
+	f.To = to
+	f.From = "" // hub-authoritative; never client-claimed
+	frame, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	ws := c.conn
+	c.mu.Unlock()
+	if ws == nil {
+		return fmt.Errorf("hub: not connected")
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	wctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
+	defer cancel()
+	return ws.Write(wctx, websocket.MessageText, frame)
+}
+
 // handleFrame processes one server frame. Unknown types are ignored
 // (forward compatibility: newer hub + older engine).
 func (c *Client) handleFrame(data []byte) {
@@ -325,9 +357,24 @@ func (c *Client) handleFrame(data []byte) {
 			return
 		}
 		c.OnSignal(s.From, s.Type, s.Side, s.Body)
+	case "relay":
+		if c.OnRelay == nil {
+			return
+		}
+		var f hub.Relay
+		if err := json.Unmarshal(data, &f); err != nil {
+			return
+		}
+		c.OnRelay(f.From, f)
 	case "error":
 		var e hub.Error
 		if err := json.Unmarshal(data, &e); err == nil {
+			if e.Sid != 0 && c.OnRelay != nil {
+				// Stream-scoped: the hub could not deliver (target
+				// offline/stalled). Route it to the stream layer.
+				c.OnRelay("", hub.Relay{Type: "error", Sid: e.Sid})
+				return
+			}
 			c.logf("hub error: %s", e.Error)
 		}
 	}

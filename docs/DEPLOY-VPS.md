@@ -1,7 +1,7 @@
 # VPS Deployment (hub) — M2
 
-**What the VPS runs:** the **hub** (presence, WebRTC signaling — the
-WSS relay fallback comes in a later M2 step) and a **STUN server**
+**What the VPS runs:** the **hub** (presence, WebRTC signaling, and
+the WSS relay fallback — all stateless) and a **STUN server**
 (coturn, STUN-only). Both are stateless: the hub holds no files, keeps
 sessions only in RAM (24 h TTL), and writes nothing to disk. There is
 **no engine on the VPS** — engines run on the devices that hold files.
@@ -116,7 +116,8 @@ their next keepalive cycle and re-announce themselves. Rollback =
 ## 6. Resource expectations
 
 - RAM: tens of MB idle; relayed transfers (step ③) add only buffer
-  memory, capped at 80 Mbit/s of relay throughput.
+  memory (the hub holds no stream state), capped at 80 Mbit/s of
+  relay throughput.
 - CPU: negligible — all crypto lives in the clients by design.
 - Disk: the image itself; **zero user data, ever**.
 - Bandwidth: STUN binding requests are tiny; P2P WebRTC transfers cost

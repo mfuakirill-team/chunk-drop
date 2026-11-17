@@ -40,8 +40,13 @@ A stateless coordination service. Responsibilities:
 - **WebSocket signaling**: relays WebRTC SDP/ICE between members of the
   same group (`sdp`/`ice` frames, sender authenticated, body opaque).
   Serves **no web pages** — internet sync is engine↔engine only.
-- **Fallback relay (step ③)**: when WebRTC hole-punching fails, the
-  hub's own WSS relay pipes the transfer (capped at 80 Mbit/s).
+- **Fallback relay (step ③, shipped)**: when WebRTC hole-punching
+  fails, the hub's own WSS relay pipes the transfer as opaque
+  `relay` frames — a dumb stateless forwarder (validate target,
+  overwrite `from`, re-send; no per-stream state). Flow control is
+  end-to-end in the engines (512 KiB sliding window + cumulative
+  acks), capping a stream near 80 Mbit/s at a 50 ms hub RTT while
+  bounding RAM at every hop.
 - **Never writes user files to disk.** No volume mounts, read-only root
   filesystem. A `/healthz` endpoint for monitoring.
 
@@ -120,7 +125,8 @@ Engine A (sender)          VPS (nginx → hub in Docker)          Engine B (rece
    │         bytes never touch the VPS                                │
    │                                                                  │
    │   if hole-punch fails (step ③):                                  │
-   │═══ WSS relay via hub:443 (hub's own relay, 80 Mbit/s cap) ═════►│
+   │═══ WSS relay via hub:443 (relay frames, stateless hub;           │
+   │    512 KiB window ⇒ ~80 Mbit/s cap; TLS-protected to the hub) ═►│
 ```
 
 ### USB sneakernet (M4)

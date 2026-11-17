@@ -393,3 +393,151 @@ func TestFingerprintB64(t *testing.T) {
 		t.Errorf("FingerprintB64 = %s, want %s", got, want)
 	}
 }
+
+// expectRelay reads frames until one relay frame from `from` arrives,
+// skipping others; returns it. Fails on a relay frame from a wrong
+// sender (spoof check).
+func expectRelay(t *testing.T, ws *websocket.Conn, from string) Relay {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		frametyp, data, err := ws.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("relay read: %v", err)
+		}
+		if frametyp != websocket.MessageText {
+			continue
+		}
+		var f Relay
+		if json.Unmarshal(data, &f) != nil || f.Type != "relay" {
+			continue
+		}
+		if f.From != from {
+			t.Fatalf("relay frame From = %q, want the hub-authoritative %q", f.From, from)
+		}
+		return f
+	}
+	t.Fatalf("never saw a relay frame from %s", from)
+	return Relay{}
+}
+
+// TestRelayStreamRelay: relay frames forward between same-group
+// devices with From overwritten authoritatively (a spoofed client
+// From never reaches the target) and Data/Sid/Eof/Ack intact.
+func TestRelayStreamRelay(t *testing.T) {
+	h := New()
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+	url := hubURL(t, srv)
+
+	d1 := newTestDevice(t, "group-relay", "pc-one")
+	d2 := newTestDevice(t, "group-relay", "pc-two")
+	ws1 := d1.dial(t, url, nil)
+	defer ws1.Close(websocket.StatusNormalClosure, "")
+	expectPresence(t, ws1, d1.id)
+	ws2 := d2.dial(t, url, nil)
+	defer ws2.Close(websocket.StatusNormalClosure, "")
+	expectPresence(t, ws2, d1.id, d2.id)
+	expectPresence(t, ws1, d1.id, d2.id)
+
+	// d1 → d2: data frame with a LIE in From (spoof attempt).
+	frame, _ := json.Marshal(Relay{Type: "relay", To: d2.id, From: "0000", Sid: 7, Data: []byte("payload")})
+	ws1Write(t, ws1, frame)
+	f := expectRelay(t, ws2, d1.id)
+	if f.Sid != 7 || string(f.Data) != "payload" || f.Eof || f.Ack != 0 {
+		t.Fatalf("data frame mangled: %+v", f)
+	}
+
+	// d2 → d1: eof + ack frames both ways (the stream is bidirectional).
+	frame, _ = json.Marshal(Relay{Type: "relay", To: d1.id, Sid: 7, Eof: true})
+	ws1Write(t, ws2, frame)
+	f = expectRelay(t, ws1, d2.id)
+	if !f.Eof || f.Sid != 7 || len(f.Data) != 0 {
+		t.Fatalf("eof frame mangled: %+v", f)
+	}
+	frame, _ = json.Marshal(Relay{Type: "relay", To: d1.id, Sid: 7, Ack: 65536})
+	ws1Write(t, ws2, frame)
+	f = expectRelay(t, ws1, d2.id)
+	if f.Ack != 65536 || f.Sid != 7 || len(f.Data) != 0 || f.Eof {
+		t.Fatalf("ack frame mangled: %+v", f)
+	}
+}
+
+// TestRelayStreamErrors: an offline target answers a stream-scoped
+// error frame (Sid preserved, so the sender aborts exactly that
+// stream), and an oversized payload is dropped without poisoning the
+// connection.
+func TestRelayStreamErrors(t *testing.T) {
+	h := New()
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+	url := hubURL(t, srv)
+
+	d1 := newTestDevice(t, "group-relay-err", "pc-one")
+	d2 := newTestDevice(t, "group-relay-err", "pc-two")
+	ws1 := d1.dial(t, url, nil)
+	defer ws1.Close(websocket.StatusNormalClosure, "")
+	expectPresence(t, ws1, d1.id)
+	ws2 := d2.dial(t, url, nil)
+	defer ws2.Close(websocket.StatusNormalClosure, "")
+	expectPresence(t, ws2, d1.id, d2.id)
+
+	// Offline target: expect one error frame scoped to the sid.
+	frame, _ := json.Marshal(Relay{Type: "relay", To: strings.Repeat("f", 64), Sid: 9, Data: []byte("x")})
+	ws1Write(t, ws1, frame)
+	errFrame := expectErrorWithSid(t, ws1, "relay target offline", 9)
+	if errFrame.Sid != 9 {
+		t.Fatalf("error frame lost the stream scope: %+v", errFrame)
+	}
+
+	// Oversized payload: dropped, connection stays usable (the next
+	// frame to the real d2 flows).
+	big := make([]byte, maxRelayData+1)
+	frame, _ = json.Marshal(Relay{Type: "relay", To: d2.id, Sid: 3, Data: big})
+	ws1Write(t, ws1, frame)
+	frame, _ = json.Marshal(Relay{Type: "relay", To: d2.id, Sid: 4, Data: []byte("still alive")})
+	ws1Write(t, ws1, frame)
+	f := expectRelay(t, ws2, d1.id)
+	if f.Sid != 4 || string(f.Data) != "still alive" {
+		t.Fatalf("connection poisoned by an oversized frame: %+v", f)
+	}
+}
+
+// ws1Write writes one text frame (helper keeps timeouts off the
+// test body).
+func ws1Write(t *testing.T, ws *websocket.Conn, frame []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ws.Write(ctx, websocket.MessageText, frame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+// expectErrorWithSid reads frames until an error frame matching the
+// text arrives; returns it (used where the Sid matters).
+func expectErrorWithSid(t *testing.T, ws *websocket.Conn, text string, sid uint64) Error {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		frametyp, data, err := ws.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("error read: %v", err)
+		}
+		if frametyp != websocket.MessageText {
+			continue
+		}
+		var e Error
+		if json.Unmarshal(data, &e) != nil || e.Type != "error" {
+			continue
+		}
+		if e.Error != text || e.Sid != sid {
+			t.Fatalf("error = %+v, want %q sid %d", e, text, sid)
+		}
+		return e
+	}
+	t.Fatalf("never saw an error frame %q (sid %d)", text, sid)
+	return Error{}
+}

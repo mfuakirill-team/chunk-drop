@@ -230,3 +230,86 @@ func TestHubRejectsWrongFirstFrame(t *testing.T) {
 		t.Fatal("connection stayed open after a bad first frame")
 	}
 }
+
+// TestSendRelayAndDispatch: SendRelay delivers through the real hub
+// to a second client, OnRelay fires with the hub-authoritative from
+// id and the payload intact; a hub error for an offline target is
+// routed to OnRelay as a stream-scoped pseudo-frame (from = "").
+func TestSendRelayAndDispatch(t *testing.T) {
+	url, srv, hub1 := testHub(t)
+	defer func() { hub1.Close(); srv.Close() }()
+
+	id1 := testIdentity(t, "engine-relay-a")
+	id2 := testIdentity(t, "engine-relay-b")
+
+	c1 := New(url, "group-key-eps", id1, t.Logf)
+	c2 := New(url, "group-key-eps", id2, t.Logf)
+
+	type rf struct {
+		from string
+		f    hub.Relay
+	}
+	var mu sync.Mutex
+	var got []rf
+	c2.OnRelay = func(from string, f hub.Relay) {
+		mu.Lock()
+		got = append(got, rf{from, f})
+		mu.Unlock()
+	}
+	var errs []hub.Relay
+	c1.OnRelay = func(from string, f hub.Relay) {
+		mu.Lock()
+		if f.Type == "error" {
+			errs = append(errs, f)
+		}
+		mu.Unlock()
+	}
+	c1.Start()
+	defer c1.Stop()
+	c2.Start()
+	defer c2.Stop()
+	waitFor(t, 3*time.Second, "c1 connected", c1.Connected)
+	waitFor(t, 3*time.Second, "c2 connected", c2.Connected)
+	waitFor(t, 3*time.Second, "c1 sees c2", func() bool {
+		return len(c1.Status().Devices) == 2
+	})
+
+	// Data frame c1 → c2.
+	if err := c1.SendRelay(id2.ID, hub.Relay{Sid: 5, Data: []byte("relay-payload")}); err != nil {
+		t.Fatalf("SendRelay: %v", err)
+	}
+	waitFor(t, 3*time.Second, "relay frame at c2", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) > 0
+	})
+	mu.Lock()
+	f := got[0]
+	mu.Unlock()
+	if f.from != id1.ID || f.f.Sid != 5 || string(f.f.Data) != "relay-payload" || f.f.Eof || f.f.Ack != 0 {
+		t.Fatalf("relay frame mangled: from=%q f=%+v", f.from, f.f)
+	}
+
+	// Ack frame c2 → c1 (the response direction uses the same path).
+	if err := c2.SendRelay(id1.ID, hub.Relay{Sid: 5, Ack: 4096}); err != nil {
+		t.Fatalf("SendRelay ack: %v", err)
+	}
+
+	// Error path: c1 sends to an offline device id — the hub's error
+	// frame must surface as {"type":"error", Sid} with from = "".
+	ghost := strings.Repeat("e", 64)
+	if err := c1.SendRelay(ghost, hub.Relay{Sid: 11, Data: []byte("x")}); err != nil {
+		t.Fatalf("SendRelay to offline: %v", err)
+	}
+	waitFor(t, 3*time.Second, "stream-scoped error at c1", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(errs) > 0
+	})
+	mu.Lock()
+	e := errs[0]
+	mu.Unlock()
+	if e.Sid != 11 {
+		t.Fatalf("error frame lost the sid: %+v", e)
+	}
+}

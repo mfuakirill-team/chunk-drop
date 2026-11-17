@@ -207,6 +207,25 @@ func HostFor(deviceID string) string {
 	return net.JoinHostPort("tunnel-"+deviceID, "9")
 }
 
+// Dial opens one HTTP connection to peer (a fresh DataChannel on the
+// engine's own offerer PC). Exported for the engine's tunnel-first
+// fallback dialer: it dials here first, then falls back to the hub
+// relay (step ③) when this fails.
+func (m *Manager) Dial(ctx context.Context, peer string) (net.Conn, error) {
+	return m.dialConn(ctx, peer)
+}
+
+// PeerConnected reports whether the outgoing PC to peer is currently
+// connected — the fallback dialer uses it to retry the tunnel
+// immediately after an ICE recovery instead of waiting out a
+// cooldown.
+func (m *Manager) PeerConnected(peer string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.out[peer]
+	return ok && p.pc != nil && p.pc.ConnectionState() == webrtc.PeerConnectionStateConnected
+}
+
 // PeerFromHost decodes HostFor's output back into a device ID.
 // Anything without the tunnel- prefix is rejected — no real DNS name
 // can slip into a tunnel dial.
