@@ -170,60 +170,79 @@ export function ReceivePage({ sessionKey, onBack }: Props) {
 
   if (!manifest) return <div class="card muted">Loading manifest…</div>;
 
+  const pct = total ? Math.floor((done / total) * 100) : 0;
+
   return (
-    <div>
+    <div class="maincol">
       <div class="card">
-        <h2 style="margin-top:0">Receive</h2>
+        <h2>Receive</h2>
         <p>
-          {manifest.files.length} file{manifest.files.length === 1 ? "" : "s"}
+          <strong>
+            {manifest.files.length} file{manifest.files.length === 1 ? "" : "s"}
+          </strong>
           {manifest.packedAsZip ? " (packed as ZIP)" : ""} ·{" "}
           {humanBytes(manifest.files.reduce((a: number, f) => a + f.size, 0))}
         </p>
-        <div class="bar">
-          <div style={{ width: `${total ? (done / total) * 100 : 0}%` }} />
+        <div
+          class="bar"
+          role="progressbar"
+          aria-label="Transfer progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={pct}
+        >
+          <div style={{ width: `${pct}%` }} />
         </div>
         <p class="muted">
           {fmtPct(done, total)} · chunk size {humanBytes(manifest.chunkSize)}
         </p>
-        {phase === "idle" && <button onClick={start}>Save all…</button>}
-        {phase === "saving" && (
-          <button class="secondary" onClick={cancel}>
-            Cancel transfer
-          </button>
+        {phase === "idle" && (
+          <div class="row">
+            <button onClick={start}>Save all…</button>
+          </div>
         )}
-        {phase === "done" && <p class="ok">Done — files saved.</p>}
+        {phase === "saving" && (
+          <div class="row">
+            <button class="secondary" onClick={cancel}>
+              Cancel transfer
+            </button>
+          </div>
+        )}
+        {phase === "done" && <p class="ok">✓ Done — files saved.</p>}
         {phase === "cancelled" && <p class="muted">Cancelled. Nothing corrupted.</p>}
         {phase === "error" && <p class="error">{err}</p>}
       </div>
 
       <div class="card">
         <h3>Files</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>path</th>
-              <th class="num">size</th>
-              <th class="num">chunks</th>
-              <th class="num">progress</th>
-            </tr>
-          </thead>
-          <tbody>
-            {manifest.files.map((f) => (
-              <FileRow
-                f={f}
-                done={fileDone[f.index]}
-                progress={fileProgress[f.index] ?? 0}
-              />
-            ))}
-          </tbody>
-        </table>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th>path</th>
+                <th class="num">size</th>
+                <th class="num">chunks</th>
+                <th class="num">progress</th>
+              </tr>
+            </thead>
+            <tbody>
+              {manifest.files.map((f) => (
+                <FileRow
+                  f={f}
+                  done={fileDone[f.index]}
+                  progress={fileProgress[f.index] ?? 0}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {log.length > 0 && (
-        <div class="card">
-          <h3>Log</h3>
+        <details class="card">
+          <summary>Log</summary>
           <pre>{log.join("\n")}</pre>
-        </div>
+        </details>
       )}
     </div>
   );
@@ -239,8 +258,8 @@ function FileRow({
   progress: number;
 }) {
   return (
-    <tr style={{ opacity: done ? 0.7 : 1 }}>
-      <td>
+    <tr class={done ? "done" : ""}>
+      <td class="path">
         {done ? "✓ " : ""}
         {f.path}
       </td>

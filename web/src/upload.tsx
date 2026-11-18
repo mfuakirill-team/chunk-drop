@@ -80,7 +80,7 @@ export function UploadPage({ uploadKey }: Props) {
   if (!uploadKey) {
     return (
       <div class="card">
-        <h2 style="margin-top:0">Send to the computer</h2>
+        <h2>Send to the computer</h2>
         <p>
           This link is missing its key. Open it by scanning the QR code
           shown on the computer's dashboard ("Receive from a phone").
@@ -192,17 +192,15 @@ export function UploadPage({ uploadKey }: Props) {
 
   return (
     <div class="card">
-      <h2 style="margin-top:0">Send to the computer</h2>
+      <h2>Send to the computer</h2>
       {phase === "idle" && (
         <div>
-          <p class="muted">Choose what to push. Everything is verified end-to-end.</p>
-          <p>
+          <p class="muted">Choose what to push — verified end-to-end.</p>
+          <div class="pickrow">
             <label class="bigbtn">
               Choose files
               <input type="file" multiple style="display:none" onChange={onPick} />
             </label>
-          </p>
-          <p>
             <label class="bigbtn secondary">
               Choose a folder
               <input
@@ -214,35 +212,49 @@ export function UploadPage({ uploadKey }: Props) {
                 {...({ webkitdirectory: "", directory: "" } as any)}
               />
             </label>
-          </p>
+          </div>
         </div>
       )}
       {phase === "hashing" && (
         <div>
           <p>
-            Reading {fileCount} file(s)… {humanBytes(hashDone)} / {humanBytes(hashTotal)}
+            Reading {fileCount} file{fileCount === 1 ? "" : "s"}… {humanBytes(hashDone)} / {humanBytes(hashTotal)}
           </p>
-          <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
-            {namesLabel(fileNames)}
-          </p>
-          <progress max={hashTotal} value={hashDone} style="width:100%" />
+          <p class="muted" style="overflow-wrap:anywhere">{namesLabel(fileNames)}</p>
+          <div
+            class="bar"
+            role="progressbar"
+            aria-label="Reading files"
+            aria-valuemin={0}
+            aria-valuemax={hashTotal}
+            aria-valuenow={hashDone}
+          >
+            <div style={{ width: `${hashTotal ? (hashDone / hashTotal) * 100 : 0}%` }} />
+          </div>
         </div>
       )}
       {phase === "uploading" && (
         <div>
           <p>
-            Uploading {fileCount} file(s) — {humanBytes(upBytes)} ·{" "}
+            Uploading {fileCount} file{fileCount === 1 ? "" : "s"} — {humanBytes(upBytes)} ·{" "}
             {fmtPct(upDone, upTotal)}
           </p>
-          <p style="margin:4px 0; overflow-wrap:anywhere">
+          <p style="overflow-wrap:anywhere">
             {curFile ? <>Sending: <strong>{curFile}</strong></> : "\u00a0"}
           </p>
-          <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
-            {namesLabel(fileNames)}
-          </p>
-          <progress max={upTotal} value={upDone} style="width:100%" />
+          <p class="muted" style="overflow-wrap:anywhere">{namesLabel(fileNames)}</p>
+          <div
+            class="bar"
+            role="progressbar"
+            aria-label="Upload progress"
+            aria-valuemin={0}
+            aria-valuemax={upTotal}
+            aria-valuenow={upDone}
+          >
+            <div style={{ width: `${upTotal ? (upDone / upTotal) * 100 : 0}%` }} />
+          </div>
           {note && <p class="muted">{note}</p>}
-          <p>
+          <div class="row">
             <button
               class="secondary"
               onClick={() => {
@@ -252,16 +264,16 @@ export function UploadPage({ uploadKey }: Props) {
             >
               Cancel
             </button>
-          </p>
+          </div>
         </div>
       )}
       {phase === "done" && (
         <div>
-          <p>✓ Sent {fileCount} file(s) — check the computer's dashboard.</p>
-          <p class="muted" style="margin:4px 0; overflow-wrap:anywhere">
-            {namesLabel(fileNames)}
+          <p class="ok">
+            ✓ Sent {fileCount} file{fileCount === 1 ? "" : "s"} — check the computer's dashboard.
           </p>
-          <p>
+          <p class="muted" style="overflow-wrap:anywhere">{namesLabel(fileNames)}</p>
+          <div class="row">
             <button
               class="secondary"
               onClick={() => {
@@ -273,22 +285,24 @@ export function UploadPage({ uploadKey }: Props) {
             >
               Send more
             </button>
-          </p>
+          </div>
         </div>
       )}
       {phase === "error" && (
         <div>
-          <p style="color:#b00">{err}</p>
-          <button
-            onClick={() => {
-              setPhase("idle");
-              setErr("");
-              setNote("");
-              setCurFile("");
-            }}
-          >
-            Try again
-          </button>
+          <p class="error">{err}</p>
+          <div class="row">
+            <button
+              onClick={() => {
+                setPhase("idle");
+                setErr("");
+                setNote("");
+                setCurFile("");
+              }}
+            >
+              Try again
+            </button>
+          </div>
         </div>
       )}
     </div>

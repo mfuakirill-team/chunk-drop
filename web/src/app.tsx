@@ -32,6 +32,7 @@ export function App() {
       : "send",
   );
   const [send, setSend] = useState<SendState | null>(null);
+  const [pasteKey, setPasteKey] = useState("");
 
   const goReceive = (k: string) => {
     setKey(k);
@@ -41,6 +42,17 @@ export function App() {
   const goSend = () => {
     setMode("send");
     setFragment("");
+  };
+  // Accept a bare session key or a full /r/#k=… link pasted by hand.
+  const openPasted = () => {
+    const raw = pasteKey.trim();
+    if (!raw) return;
+    const at = raw.indexOf("#k=");
+    const k = at >= 0 ? parseFragmentKey(raw.slice(at)) : raw;
+    if (k) {
+      setPasteKey("");
+      goReceive(k);
+    }
   };
 
   return (
@@ -67,19 +79,34 @@ export function App() {
         </div>
       )}
       {!(mode === "receive" && standaloneReceiveLink) && mode !== "upload" && (
-        <footer class="muted">
-          <p>
-            {mode === "receive" ? (
+        <footer class="site">
+          {mode === "receive" ? (
+            <p>
               <button class="secondary" onClick={goSend}>
-                ← sender dashboard
+                ← Sender dashboard
               </button>
-            ) : (
-              <span>
-                Receiving on this device? Open the QR link or paste the session
-                key below.
-              </span>
-            )}
-          </p>
+            </p>
+          ) : (
+            <form
+              class="footform"
+              onSubmit={(e) => {
+                e.preventDefault();
+                openPasted();
+              }}
+            >
+              <span>Receiving here? Open the QR link, or paste a session key:</span>
+              <input
+                type="text"
+                value={pasteKey}
+                placeholder="session key or /r/ link"
+                aria-label="Session key"
+                onInput={(e) => setPasteKey((e.target as HTMLInputElement).value)}
+              />
+              <button class="secondary" disabled={!pasteKey.trim()}>
+                Receive
+              </button>
+            </form>
+          )}
         </footer>
       )}
     </div>

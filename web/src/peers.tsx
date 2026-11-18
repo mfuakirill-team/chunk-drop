@@ -146,20 +146,25 @@ export function ModeCard() {
   const labels: Record<string, string> = { auto: "Auto", local: "Local", internet: "Internet" };
   return (
     <div class="card">
-      <h3 style="margin-top:0">Mesh mode</h3>
-      <div class="seg">
+      <h3>Mesh mode</h3>
+      <div class="seg" role="group" aria-label="Mesh mode">
         {["auto", "local", "internet"].map((m) => (
-          <button class={mode === m ? "on" : ""} disabled={busy} onClick={() => void pick(m)}>
+          <button
+            class={mode === m ? "on" : ""}
+            aria-pressed={mode === m}
+            disabled={busy}
+            onClick={() => void pick(m)}
+          >
             {labels[m]}
           </button>
         ))}
       </div>
-      <p class="muted" style="margin:8px 0 0">
+      <p class="muted">
         {mode === "local"
-          ? "local network only"
+          ? "Local network only — hub off"
           : mode === "internet"
-            ? "via the hub only"
-            : "everything"}
+            ? "Via the hub only — LAN skipped"
+            : "LAN + internet"}
       </p>
     </div>
   );
@@ -194,40 +199,40 @@ export function PeersPanel() {
 
   return (
     <div class="card">
-      <h3 style="margin-top:0">Clients</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>name</th>
-            <th>ip</th>
-            <th class="num">▼ down</th>
-            <th class="num">▲ up</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((p) => (
+      <h3>Clients</h3>
+      <div class="tablewrap">
+        <table>
+          <thead>
             <tr>
-              <td>
-                {p.self ? "★ " : ""}
-                {p.name || p.id.slice(0, 8)}
-                {p.hub && !p.ip ? " 🌐" : ""}
-              </td>
-              <td title={p.id}>{addr(p)}</td>
-              <td class="num" title={`downloading from ${p.name || p.id.slice(0, 8)}`}>
-                {humanSpeed(p.down)}
-              </td>
-              <td class="num" title={`serving to ${p.name || p.id.slice(0, 8)}`}>
-                {humanSpeed(p.up)}
-              </td>
+              <th>name</th>
+              <th>ip</th>
+              <th class="num">▼ down</th>
+              <th class="num">▲ up</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {peers && peers.peers.length === 0 && <p class="muted">no other clients yet</p>}
-      {!peers && <p class="muted">discovering…</p>}
-      <p class="muted" style="margin-bottom:0">
-        sync folder ↔ clients with the key, every 5 s
-      </p>
+          </thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr class={p.self ? "self" : ""}>
+                <td>
+                  {p.self ? "★ " : ""}
+                  {p.name || p.id.slice(0, 8)}
+                  {p.hub && !p.ip ? " 🌐" : ""}
+                </td>
+                <td title={p.id}>{addr(p)}</td>
+                <td class="num" title={`downloading from ${p.name || p.id.slice(0, 8)}`}>
+                  {humanSpeed(p.down)}
+                </td>
+                <td class="num" title={`serving to ${p.name || p.id.slice(0, 8)}`}>
+                  {humanSpeed(p.up)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {peers && peers.peers.length === 0 && <p class="muted">No other clients yet.</p>}
+      {!peers && <p class="muted">Discovering…</p>}
+      <p class="muted">sync folder ↔ clients with the key, every 5 s</p>
     </div>
   );
 }
@@ -273,24 +278,24 @@ export function ActivityPanel({ send }: { send: SendState | null }) {
 
   return (
     <div class="card">
-      <h3 style="margin-top:0">
-        Activity{" "}
-        <button class="secondary" style="padding:2px 10px" onClick={() => setOpen(!open)}>
-          {open ? "hide" : "show"}
+      <div class="cardhead">
+        <h3>Activity</h3>
+        <button class="ghost" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? "Hide" : "Show"}
         </button>
-      </h3>
+      </div>
       {open && (
         <div>
           {/* live receiver progress of the running transfer */}
           {liveReceiver ? (
-            <p style="margin:4px 0; overflow-wrap:anywhere">
+            <p style="overflow-wrap:anywhere">
               ▲ {liveReceiver.receiver}: {Object.keys(liveReceiver.have).length} file(s)
               {receivingNames.length > 0 ? ` — ${namesLabel(receivingNames, receivingNames.length)}` : ""}
             </p>
           ) : null}
           {/* phone→PC pushes (M1) */}
           {(act?.incoming ?? []).map((u) => (
-            <p style="margin:4px 0; overflow-wrap:anywhere">
+            <p style="overflow-wrap:anywhere">
               {u.finished ? "✓" : "▼"} {u.files} file(s)
               {u.names?.length ? ` — ${namesLabel(u.names, u.files)}` : ""} — {humanBytes(u.bytesDone)}
               {u.bytesTotal > 0 ? ` / ${humanBytes(u.bytesTotal)}` : ""}
@@ -303,7 +308,7 @@ export function ActivityPanel({ send }: { send: SendState | null }) {
                 <span class="muted">{fmtTime(e.time)}</span> {e.msg}
               </li>
             ))}
-            {latest.length === 0 && <li class="muted">nothing yet</li>}
+            {latest.length === 0 && <li class="muted">Nothing yet.</li>}
           </ul>
         </div>
       )}

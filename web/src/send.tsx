@@ -55,6 +55,7 @@ export function SendPage({ onStart, onChange }: Props) {
   const [busy, setBusy] = useState(false);
   const [pickBusy, setPickBusy] = useState(false);
   const [manualPaths, setManualPaths] = useState("");
+  const [copied, setCopied] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const setKeyAndSave = (k: string) => {
@@ -198,65 +199,60 @@ export function SendPage({ onStart, onChange }: Props) {
   const receiveUrl = started ? buildReceiveUrl(location.origin, started.key) : "";
 
   return (
-    <div>
+    <div class="maincol">
       <div class="card">
-        <h2 style="margin-top:0">Send</h2>
+        <h2>Send</h2>
         <p class="muted">
-          Pick files or a folder (a dialog opens on the engine machine),
-          or paste absolute paths. The receiver scans the QR (or opens
-          the link) and saves straight from the browser.
+          Pick files on this machine, or paste paths. The receiver scans the
+          QR and saves straight from the browser.
         </p>
-        <p>
+        <div class="row">
           <button disabled={pickBusy} onClick={() => void pickNative(false)}>
             {pickBusy ? "Opening dialog…" : "Pick files…"}
-          </button>{" "}
+          </button>
           <button class="secondary" disabled={pickBusy} onClick={() => void pickNative(true)}>
             Pick folder…
-          </button>{" "}
-          <label style="margin-left:12px">
+          </button>
+          <label class="check">
             <input
               type="checkbox"
               checked={zip}
               onChange={(e) => setZip((e.target as HTMLInputElement).checked)}
-            />{" "}
+            />
             pack files as ZIP
           </label>
-        </p>
-        <p>
+        </div>
+        <div class="row">
           <input
             type="text"
-            placeholder={"or paste paths, one per line\n/home/me/big.iso, D:\\movie.mkv"}
+            placeholder="…or paste absolute paths, one per line (/home/me/big.iso, D:\movie.mkv)"
             value={manualPaths}
             onInput={(e) => setManualPaths((e.target as HTMLInputElement).value)}
           />
-        </p>
-        <p>
           <button class="secondary" onClick={applyManual} disabled={!manualPaths.trim()}>
             Use pasted paths
           </button>
-        </p>
+        </div>
 
-        {/* #1.1: selected paths get their own frame + Reset. */}
+        {/* selected paths get their own frame + Reset */}
         <div class={"selbox" + (paths.length > 0 ? " selbox-on" : "")}>
           {paths.length === 0 ? (
-            <p class="muted" style="margin:0">
-              Nothing selected yet.
-            </p>
+            <p class="muted">Nothing selected.</p>
           ) : (
             <div>
-              <p style="margin:0 0 6px">
+              <p class="selhead">
                 <strong>
                   {paths.length} path{paths.length === 1 ? "" : "s"} selected
                 </strong>
-                {zip ? " → bundle.zip" : ""}
-                {" "}
-                <button class="secondary" style="padding:2px 10px" onClick={reset}>
-                  Reset selection
+                {zip && <span class="muted">→ bundle.zip</span>}
+                <span class="grow" />
+                <button class="ghost" onClick={reset}>
+                  Reset
                 </button>
               </p>
               <ul class="sellist">
                 {paths.slice(0, 12).map((p) => (
-                  <li style={{ overflowWrap: "anywhere" }}>{p}</li>
+                  <li>{p}</li>
                 ))}
                 {paths.length > 12 ? <li class="muted">… +{paths.length - 12} more</li> : ""}
               </ul>
@@ -264,47 +260,51 @@ export function SendPage({ onStart, onChange }: Props) {
           )}
         </div>
 
-        <p>
+        <label class="field">
+          <span class="lbl">Group key</span>
           <input
             type="text"
-            placeholder="group key — applied instantly (engine.toml written ~20 s later)"
+            placeholder="applied instantly · saved to engine.toml"
             value={groupKey}
             onInput={(e) => setKeyAndSave((e.target as HTMLInputElement).value)}
           />
-        </p>
-        {keyStatus && <p class="muted" style="margin:2px 0">{keyStatus}</p>}
-        <p>
+        </label>
+        {keyStatus && <p class="muted">{keyStatus}</p>}
+        <div class="row">
           <button disabled={busy || !!started} onClick={start}>
             {busy ? "Hashing…" : "Start transfer"}
-          </button>{" "}
-          {/* #1.2: Cancel alongside Start (right side). */}
+          </button>
           {started && (
             <button class="secondary" onClick={cancel}>
               Cancel
             </button>
           )}
-          {err && <span class="error"> {err}</span>}
-        </p>
+        </div>
+        {err && <p class="error">{err}</p>}
       </div>
 
       {started && (
         <div class="card">
-          <h3 style="margin-top:0">Scan to receive</h3>
-          <canvas class="qr" ref={canvasRef} width={320} height={320} />
-          <p>
+          <h3>Scan to receive</h3>
+          <div class="qrbox">
+            <canvas class="qr" ref={canvasRef} width={320} height={320} />
+          </div>
+          <div class="row">
             <button
               class="secondary"
-              onClick={() => void navigator.clipboard?.writeText(receiveUrl)}
+              onClick={() => {
+                void navigator.clipboard?.writeText(receiveUrl);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
             >
-              Copy link
-            </button>{" "}
+              {copied ? "Copied!" : "Copy link"}
+            </button>
             <button class="secondary" onClick={() => onStart(started.key)}>
               Open on this device
             </button>
-          </p>
-          <p class="muted" style={{ overflowWrap: "anywhere" }}>
-            {receiveUrl}
-          </p>
+          </div>
+          <p class="url">{receiveUrl}</p>
         </div>
       )}
 
@@ -413,36 +413,35 @@ export function PhoneUploadCard() {
 
   return (
     <div class="card">
-      <h3 style="margin-top:0">Receive from a phone</h3>
+      <h3>Receive from a phone</h3>
       {!slot ? (
         <div>
           {closedNote && (
-            <p class="muted" style="margin-bottom:8px">
-              Link closed — the phone's key no longer works (its next
-              chunk gets a 401). Open a new link for the next transfer.
+            <p class="muted">
+              Link closed — the phone's key no longer works. Open a new link
+              for the next transfer.
             </p>
           )}
-          <p class="muted" style="margin-bottom:8px">
-            Let a phone push photos/files into this PC — they land in the
-            sync folder and propagate to your other engines.
+          <p class="muted">
+            Let a phone push photos/files into this PC's sync folder.
           </p>
-          <button disabled={busy || !loadGroupKey()} onClick={() => void open()}>
-            {busy ? "Opening…" : "Open a phone upload link"}
-          </button>
-          {!loadGroupKey() && (
-            <p class="muted">set the group key above first</p>
-          )}
+          <div class="row">
+            <button disabled={busy || !loadGroupKey()} onClick={() => void open()}>
+              {busy ? "Opening…" : "Open upload link"}
+            </button>
+          </div>
+          {!loadGroupKey() && <p class="muted">Set the group key above first.</p>}
           {err && <p class="error">{err}</p>}
         </div>
       ) : (
         <div>
           {renewed && (
-            <p class="muted" style="margin-bottom:0">
-              The previous link ended — a fresh QR is shown below.
-            </p>
+            <p class="muted">The previous link ended — a fresh QR is shown below.</p>
           )}
-          <canvas class="qr" ref={canvasRef} width={320} height={320} />
-          <p>
+          <div class="qrbox">
+            <canvas class="qr" ref={canvasRef} width={320} height={320} />
+          </div>
+          <div class="row">
             <button
               class="secondary"
               onClick={() => {
@@ -452,20 +451,15 @@ export function PhoneUploadCard() {
               }}
             >
               {copied ? "Copied!" : "Copy link"}
-            </button>{" "}
+            </button>
             <button class="secondary" disabled={busy} onClick={() => void close()}>
               Close link
             </button>
-          </p>
-          <p class="muted" style={{ overflowWrap: "anywhere" }}>
-            {url}
-          </p>
-          <p class="muted" style="margin-bottom:0">
-            Anyone with this link can upload until you close it (or 24 h) —
-            files land on this PC only. The link is reusable: the phone's
-            "Send more" starts a fresh batch on the same QR, and the QR
-            only renews if the link ends on its own (expired or engine
-            restarted) — never after you press Close link.
+          </div>
+          <p class="url">{url}</p>
+          <p class="muted">
+            Anyone with this link can upload until you close it (or 24 h).
+            The phone's "Send more" reuses the same QR.
           </p>
         </div>
       )}

@@ -211,7 +211,7 @@ program: presence + WebRTC signaling, no LAN, no files) — see
    (Chrome/Edge/Firefox — any modern one.)
 2. **Pick files…** (multi-select) or **Pick folder…** (recursive walk).
    - Selected paths appear in their own **frame** (blue border) with a
-     **Reset selection** button — obvious what's about to be sent.
+     **Reset** button — obvious what's about to be sent.
    - "pack files as ZIP" is optional; for folders it can be handy on
      phones (one file to save instead of a tree). It's a ZIP with
      **no compression** (store mode) — near-instant pack.
@@ -227,7 +227,9 @@ Requirements: a **browser**, on the **same network** (same Wi-Fi/LAN
 subnet). Nothing installed, no account, no app.
 
 1. Scan the QR with the phone camera (or open the copied link on any
-   device — desktops included).
+   device — desktops included). Without the QR: paste the session key
+   or a `/r/#k=…` link into the form at the bottom of the sender
+   dashboard and press **Receive**.
 2. The page shows the file list: paths, sizes, chunk counts. Verify what
    you're about to save matches what you expected.
 3. Tap **Save all…**
@@ -236,7 +238,8 @@ subnet). Nothing installed, no account, no app.
    - Files stream chunk-by-chunk, each chunk SHA-256-verified; network
      hiccups are retried patiently (20 s patience window) instead of
      killing the transfer.
-4. Per-file ✓ marks and a log appear live; sender sees the same progress.
+4. Per-file ✓ marks appear live; a detailed transfer **log** sits in a
+   collapsible card below the file list. Sender sees the same progress.
 5. Done → "Done — files saved." Open the Files app / Downloads folder.
 
 **Receiving on the sending machine itself** ("Open on this device"
