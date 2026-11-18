@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 
 import {
   KEY_HEADER,
+  UI_HEADER,
   postUploadClose,
   postUploadNew,
   type SessionInfo,
@@ -66,18 +67,19 @@ export function SendPage({ onStart, onChange }: Props) {
       const prev = loadGroupKey();
       if (!k || k === prev) return;
       try {
-        // The CURRENT engine key authenticates the change (it is the
-        // dashboard credential); first run has none — local-only gate.
+        // The engine trusts the dashboard's own stamp (custom header +
+        // Origin), not an old key: the owner replaces the key freely,
+        // and a browser that lost its saved copy just types it again.
         const r = await fetch("/api/key", {
           method: "POST",
-          headers: { [KEY_HEADER]: prev },
+          headers: { [UI_HEADER]: "dashboard" },
           body: JSON.stringify({ key: k }),
         });
         if (r.ok) {
           saveGroupKey(k);
           setKeyStatus("key applied — mesh rekeyed; engine.toml updated in ~20 s");
         } else if (r.status === 401) {
-          setKeyStatus("engine rejected the change — wrong current group key");
+          setKeyStatus("engine refused the change — open this dashboard on the engine itself");
         } else if (r.status === 400) {
           setKeyStatus(
             "invalid key — printable characters only (no quotes, backslash or control characters)",

@@ -43,6 +43,12 @@ export interface SessionInfo {
 
 export const KEY_HEADER = "X-ChunkDrop-Key";
 
+/** The dashboard's own stamp on control POSTs: cross-site pages cannot
+ * add custom headers (CORS preflight), so its presence is what tells
+ * the engine "sent by this dashboard's script" — the drive-by gate on
+ * POST /api/key. */
+export const UI_HEADER = "X-ChunkDrop-UI";
+
 /** Read the session key from the URL fragment (#k=…). */
 export function readKeyFromFragment(): string {
   const h = location.hash;

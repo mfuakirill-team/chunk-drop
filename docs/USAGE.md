@@ -79,9 +79,12 @@ the mesh rekeys on the spot, no restart — and `engine.toml` is updated
 ~20 s later, so a quick correction within that window is written only
 once. Any key value works (there is no length or character-format
 requirement beyond what TOML and HTTP headers can physically carry:
-no quotes, backslash or control characters). When a key is already set,
-replacing it requires typing the current one (it is the dashboard
-credential); the very first key needs no credential.
+no quotes, backslash or control characters). **No old key is needed —
+ever.** The engine trusts the dashboard's own stamp (custom header +
+Origin), not a previously typed key, so a browser that lost its saved
+copy (hand-edited toml, wiped PWA storage, a different browser) just
+types the key again; re-typing the key that is already set is a harmless
+no-op.
 
 ```bash
 # Linux / macOS — the keygen alternative
@@ -417,8 +420,10 @@ the cached old web app.
 
 ### 5.2 "401 / group key rejected" (sender dashboard)
 
-- The group key in the dashboard doesn't match `engine.toml`. Re-copy
-  from `engine keygen` output → paste into both places.
+- The dashboard's saved key doesn't match `engine.toml` (hand-edited
+  file, wiped browser storage, different browser). Just **type the
+  current key into the group-key field** — no old key is needed, the
+  engine applies it and the dashboard recovers on the next poll (§2.1).
 - **First-run template**: if the config still says
   `group_key = "<paste … here>"`, the engine correctly refuses to
   start sessions (fail closed). Set a real key (§2.1).

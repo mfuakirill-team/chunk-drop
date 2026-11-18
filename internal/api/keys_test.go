@@ -3,15 +3,18 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/hubclient"
 )
 
-// POST /api/key (M2): the dashboard sets the group key. Local-only;
-// with a real key configured the current key is the credential; the
-// engine applies it instantly and defers only the engine.toml write.
+// POST /api/key (M2): the dashboard sets the group key. Local-only
+// plus the same-page stamp (HeaderUI + matching Origin) — the current
+// key is NOT the credential, the owner replaces it freely. Applied
+// instantly; only the engine.toml write is deferred.
 func TestKeySet(t *testing.T) {
 	const oldKey = "old-secret-old-secret-old-secret!"
 	const newKey = "new-secret-new-secret-new-secret!"
@@ -22,7 +25,7 @@ func TestKeySet(t *testing.T) {
 		var applied string
 		srv.OnKey = func(key string) { applied = key }
 		h := srv.Handler()
-		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"`+newKey+`"}`)
+		rec := reqKeyStamp(t, h, "", `{"key":"`+newKey+`"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
@@ -51,7 +54,7 @@ func TestKeySet(t *testing.T) {
 		var applied string
 		srv.OnKey = func(key string) { applied = key }
 		h := srv.Handler()
-		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"test"}`)
+		rec := reqKeyStamp(t, h, "", `{"key":"test"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
@@ -60,36 +63,91 @@ func TestKeySet(t *testing.T) {
 		}
 	})
 
-	t.Run("wrong current key rejected", func(t *testing.T) {
+	t.Run("no UI stamp — rejected (the old drive-by shape)", func(t *testing.T) {
 		srv, _, _ := newTestServer(t)
 		srv.SetGroupKey(oldKey)
 		called := false
 		srv.OnKey = func(string) { called = true }
 		h := srv.Handler()
-		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "wrong-wrong-wrong", `{"key":"`+newKey+`"}`)
+		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"`+newKey+`"}`)
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", rec.Code)
 		}
 		if called {
-			t.Error("OnKey called despite failed auth")
+			t.Error("OnKey called despite missing stamp")
 		}
 		if srv.GroupKey() != oldKey {
 			t.Errorf("GroupKey changed on rejected request: %q", srv.GroupKey())
 		}
 	})
 
-	t.Run("correct current key accepted", func(t *testing.T) {
+	t.Run("foreign Origin — rejected (drive-by webpage)", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.SetGroupKey(oldKey)
+		called := false
+		srv.OnKey = func(string) { called = true }
+		h := srv.Handler()
+		rec := reqKeyOrigin(t, h, "https://evil.example", `{"key":"`+newKey+`"}`)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		if called {
+			t.Error("OnKey called despite foreign Origin")
+		}
+		if srv.GroupKey() != oldKey {
+			t.Errorf("GroupKey changed on rejected request: %q", srv.GroupKey())
+		}
+	})
+
+	t.Run("own Origin — accepted", func(t *testing.T) {
 		srv, _, _ := newTestServer(t)
 		srv.SetGroupKey(oldKey)
 		var applied string
 		srv.OnKey = func(key string) { applied = key }
 		h := srv.Handler()
-		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", oldKey, `{"key":"`+newKey+`"}`)
+		rec := reqKeyOrigin(t, h, "http://192.168.1.5:8090", `{"key":"`+newKey+`"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
 		if applied != newKey || srv.GroupKey() != newKey {
 			t.Errorf("applied=%q groupKey=%q", applied, srv.GroupKey())
+		}
+	})
+
+	t.Run("no Origin (curl, script) — accepted", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.SetGroupKey(oldKey)
+		var applied string
+		srv.OnKey = func(key string) { applied = key }
+		h := srv.Handler()
+		rec := reqKeyStamp(t, h, "", `{"key":"`+newKey+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if applied != newKey || srv.GroupKey() != newKey {
+			t.Errorf("applied=%q groupKey=%q", applied, srv.GroupKey())
+		}
+	})
+
+	t.Run("key already set — browser that lost its copy just retypes it", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.SetGroupKey(oldKey)
+		rekeyed := false
+		srv.OnKey = func(string) { rekeyed = true }
+		h := srv.Handler()
+		rec := reqKeyStamp(t, h, "", `{"key":"`+oldKey+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Applied bool `json:"applied"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Applied || rekeyed || srv.GroupKey() != oldKey {
+			t.Errorf("same-key resubmit must be a no-op: applied=%v rekeyed=%v key=%q",
+				out.Applied, rekeyed, srv.GroupKey())
 		}
 	})
 
@@ -99,7 +157,7 @@ func TestKeySet(t *testing.T) {
 		var applied string
 		srv.OnKey = func(key string) { applied = key }
 		h := srv.Handler()
-		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"test"}`)
+		rec := reqKeyStamp(t, h, "", `{"key":"test"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
@@ -113,7 +171,7 @@ func TestKeySet(t *testing.T) {
 		srv.SetGroupKey("")
 		srv.OnKey = func(string) { t.Error("OnKey called for invalid key") }
 		h := srv.Handler()
-		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"bad\tkey"}`)
+		rec := reqKeyStamp(t, h, "", `{"key":"bad\tkey"}`)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", rec.Code)
 		}
@@ -122,11 +180,38 @@ func TestKeySet(t *testing.T) {
 	t.Run("no OnKey wired — endpoint disabled", func(t *testing.T) {
 		srv, _, _ := newTestServer(t)
 		h := srv.Handler()
-		rec := reqKeyBody(t, h, http.MethodPost, "/api/key", "", `{"key":"`+newKey+`"}`)
+		rec := reqKeyStamp(t, h, "", `{"key":"`+newKey+`"}`)
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", rec.Code)
 		}
 	})
+}
+
+// reqKeyStamp POSTs /api/key with the dashboard's stamp headers but no
+// Origin header (the curl/script shape — and the browser shape when
+// the engine URL was opened without a referring site).
+func reqKeyStamp(t *testing.T, h http.Handler, origin, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return reqKeyOrigin(t, h, origin, body)
+}
+
+// reqKeyOrigin POSTs /api/key with the UI stamp; origin "" sends no
+// Origin header, anything else sets it verbatim (own or foreign). The
+// request Host is fixed to the engine's LAN address so "own Origin"
+// values can be formed exactly like the browser would.
+func reqKeyOrigin(t *testing.T, h http.Handler, origin, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/key", strings.NewReader(body))
+	req.RemoteAddr = testLocalAddr
+	req.Host = "192.168.1.5:8090"
+	req.Header.Set(HeaderUI, "dashboard")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }
 
 // GET /api/peers (M2 clients card): LAN beacons and hub devices join

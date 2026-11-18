@@ -25,6 +25,11 @@ const (
 	HeaderKey = "X-ChunkDrop-Key"
 	// HeaderSession optionally carries the session id (dashboard calls).
 	HeaderSession = "X-ChunkDrop-Session"
+	// HeaderUI is the dashboard's own stamp on control POSTs (M2):
+	// cross-site pages cannot add custom headers (CORS preflight), so
+	// its presence says "sent by the dashboard's own script" — the
+	// drive-by gate for POST /api/key (see internal/api/keys.go).
+	HeaderUI = "X-ChunkDrop-UI"
 	// ChunkHashHeader is the convenience hash cross-check on chunk GETs.
 	ChunkHashHeader = "X-Chunk-Hash"
 )

@@ -122,6 +122,26 @@ devices by design.
 | 🔒 `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries],"incoming":[phone pushes in progress]}` |
 | 🔒 `POST /api/upload/new` | Mint a phone-upload slot: `{"id","key"}` (§4 upload direction) |
 | 🔒 `POST /api/upload/close` | Kill a phone-upload link: body `{"key":"<upload-key>"}` |
+| 🔒 `POST /api/key` | Set the group key from the dashboard: body `{"key":"…"}` → `{"applied":bool,"saveInSeconds":20}` — see below for its auth (no `X-ChunkDrop-Key`) |
+
+**`POST /api/key` is gated differently from every other dashboard route**:
+the group key cannot be its own credential (a browser that lost its saved
+copy — hand-edited toml, wiped PWA storage — could then never re-enter).
+Instead the request carries a same-page stamp, and the engine applies the
+key with **no current-key comparison**:
+
+- `X-ChunkDrop-UI: dashboard` header must be present. Cross-site pages
+  cannot add custom headers (CORS preflight), so this says "sent by the
+  dashboard's own script".
+- An `Origin` header, when the browser sent one, must name the engine's
+  own `host:port` (scheme-insensitive). Empty `Origin` (curl, scripts) is
+  allowed — the local-only wrapper already gates those.
+
+A drive-by webpage on this device can still send blind requests (they
+look local) but can supply neither stamp, so it gets `401`. The key
+applies instantly (mesh rekeys); only the engine.toml write is deferred
+(~20 s, flushed on shutdown). Typing the key that is already set is a
+harmless no-op (`{"applied":false}`).
 
 Sync normative details:
 - **In-progress pull temp files are never announced or planned.** A
