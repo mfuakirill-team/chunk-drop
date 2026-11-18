@@ -70,4 +70,30 @@ func TestHubEndpoint(t *testing.T) {
 			t.Errorf("wrong key = %d, want 401", rec.Code)
 		}
 	})
+
+	t.Run("relayOnly surfaces the step ③ knob", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.SetGroupKey("group-secret-group-secret-group!!")
+		id, err := device.LoadOrCreate(t.TempDir(), "test-pc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.SetHub(hubclient.New("ws://hub.example/hub/ws", "group-secret-group-secret-group!!", id, nil))
+		srv.RelayOnly = true
+		h := srv.Handler()
+		rec := reqKey(t, h, http.MethodGet, "/api/hub", "group-secret-group-secret-group!!")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Enabled   bool `json:"enabled"`
+			RelayOnly bool `json:"relayOnly"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if !out.Enabled || !out.RelayOnly {
+			t.Errorf("body = %s", rec.Body.String())
+		}
+	})
 }

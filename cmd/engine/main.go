@@ -228,6 +228,8 @@ func run(portFlag int, bindFlag string, noBrowser bool) error {
 	srv.SetGroupKey(cfg.GroupKey)
 	srv.Picker = pickerAdapters{}
 	srv.Activity = act // #1.3: concise feed → dashboard status panel
+	// Step ③ diagnosis knob, surfaced in the hub status card (step ⑤).
+	srv.RelayOnly = os.Getenv(relayOnlyEnv) != ""
 	// Dashboard is local-only by default (it controls this PC).
 	srv.AllowRemoteDashboard = cfg.AllowRemoteDashboard
 
@@ -413,6 +415,7 @@ type meshRuntime struct {
 	relay     *relay.Manager // step ③ fallback: mesh HTTP over the hub WSS
 	relaySrv  *http.Server
 	dial      *remoteDialer // per-peer transport choice (tunnel → relay)
+	rs        *routeState   // per-peer modes + route observations (step ④)
 	stopFn    func()        // extra teardown (the sync runner), chained first
 }
 
@@ -443,6 +446,13 @@ func (m *meshRuntime) stop() {
 // incarnation, start a new one (keyApplier.rekey).
 func startMesh(key string, d meshDeps) *meshRuntime {
 	m := &meshRuntime{}
+
+	// Per-peer controls (M2 step ④): one state per incarnation, owned
+	// by the dialer (route choice) and peerRefs (blocks), read and
+	// driven by the dashboard. A rekey builds a fresh one — toggles
+	// describe this run, they are not config.
+	m.rs = &routeState{}
+	d.srv.SetRoutes(m.rs)
 
 	// LAN discovery (#5/#7): UDP broadcast beacons authenticated by
 	// an HMAC of the group key; inactive when no key is configured.
@@ -487,8 +497,16 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 			IdleTimeout:       2 * time.Minute,
 		}
 		go m.relaySrv.Serve(m.relay.Listener())
-		// Per-peer transport choice: tunnel first, relay fallback.
-		m.dial = &remoteDialer{tun: m.tunnelMgr, rel: m.relay, logf: logx.Adapter(logx.LevelInfo, "mesh")}
+		// Per-peer transport choice: tunnel first, relay fallback,
+		// steered by the owner's per-peer modes (step ④). The tunnel
+		// field must be a true nil interface when relayOnlyEnv skips
+		// the tunnel — a typed-nil *Manager would pass the nil check
+		// and panic on dial.
+		var tunIf tunnelDialer
+		if m.tunnelMgr != nil {
+			tunIf = m.tunnelMgr
+		}
+		m.dial = &remoteDialer{tun: tunIf, rel: m.relay, rs: m.rs, logf: logx.Adapter(logx.LevelInfo, "mesh")}
 		d.srv.SetHub(m.hub)
 		if m.tunnelMgr != nil {
 			log.Printf("hub: %s — internet mesh on", d.cfg.HubURL)
@@ -525,17 +543,18 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 }
 
 // peerRefs builds the syncmesh peer list: LAN beacons first (the
-// local route always wins — step ④ adds proper probing and per-peer
-// toggles), then hub devices join over the tunnel or, when the tunnel
-// cannot connect, the hub relay — both carry the same mesh HTTP.
+// local route always wins), then hub devices join over the tunnel
+// or, when the tunnel cannot connect, the hub relay — both carry the
+// same mesh HTTP. Peers paused in the dashboard (mode "off", step ④)
+// are dropped from both halves.
 // Beacons carry the persistent device ID, the same string the hub
 // presence uses — the join is exact.
 func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 	var out []syncmesh.PeerRef
 	lanSeen := map[string]bool{}
 	for _, mem := range m.disc.Table().List() {
-		if mem.ID == m.disc.Self().ID {
-			continue
+		if mem.ID == m.disc.Self().ID || m.rs.Blocked(mem.ID) {
+			continue // self; or paused in the dashboard (step ④)
 		}
 		lanSeen[mem.ID] = true
 		out = append(out, syncmesh.PeerRef{
@@ -546,7 +565,7 @@ func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 	}
 	if m.hub != nil && m.dial != nil {
 		for _, dev := range m.hub.Status().Devices {
-			if dev.ID == m.disc.Self().ID || dev.ID == d.deviceID || lanSeen[dev.ID] {
+			if dev.ID == m.disc.Self().ID || dev.ID == d.deviceID || lanSeen[dev.ID] || m.rs.Blocked(dev.ID) {
 				continue
 			}
 			out = append(out, syncmesh.PeerRef{
@@ -566,6 +585,96 @@ func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 // routing.
 const relayOnlyEnv = "CHUNKDROP_RELAY_ONLY"
 
+// routeState owns the per-peer sync controls (M2 step ④): the owner's
+// mode per peer (auto/tunnel/relay/off) and the transport each
+// internet peer actually used last. The remoteDialer consults it for
+// every dial and records what it used; peerRefs drops "off" peers;
+// the dashboard reads and drives it via /api/peers and
+// POST /api/peer/mode (it satisfies api.RouteControl).
+//
+// RAM-only by design: toggles describe this run's debugging and
+// pausing — a restart, or a group-key rekey (which rebuilds the whole
+// mesh), returns every peer to auto. Peering changes are rare, and the
+// default (auto) is what a healthy mesh wants anyway.
+type routeState struct {
+	mu    sync.Mutex
+	modes map[string]string // deviceID → auto|tunnel|relay|off
+	route map[string]string // deviceID → tunnel|relay (last used)
+}
+
+// routeModeOff pauses sync with a peer (it leaves the mesh peer
+// list); the other modes steer route selection. "auto" is the default
+// and is stored explicitly only when the owner re-selects it.
+func (rs *routeState) SetMode(id, mode string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("empty peer id")
+	}
+	switch mode {
+	case "auto", "tunnel", "relay", "off":
+	default:
+		return fmt.Errorf("unknown mode %q", mode)
+	}
+	rs.mu.Lock()
+	if rs.modes == nil {
+		rs.modes = map[string]string{}
+	}
+	if mode == "auto" {
+		delete(rs.modes, id)
+	} else {
+		rs.modes[id] = mode
+	}
+	rs.mu.Unlock()
+	logx.Info("mesh", "peer %.12s… mode → %s", id, mode)
+	return nil
+}
+
+// Mode reports a peer's mode; "auto" when unset.
+func (rs *routeState) Mode(id string) string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if m, ok := rs.modes[id]; ok {
+		return m
+	}
+	return "auto"
+}
+
+// Blocked reports whether sync with a peer is paused (mode "off").
+func (rs *routeState) Blocked(id string) bool {
+	return rs.Mode(id) == "off"
+}
+
+// Modes snapshots deviceID → mode ("auto" filled in — the API report).
+func (rs *routeState) Modes() map[string]string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	out := map[string]string{}
+	for id, m := range rs.modes {
+		out[id] = m
+	}
+	return out
+}
+
+// Routes snapshots deviceID → last transport used ("tunnel"/"relay").
+func (rs *routeState) Routes() map[string]string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	out := map[string]string{}
+	for id, r := range rs.route {
+		out[id] = r
+	}
+	return out
+}
+
+// setRoute records the transport a successful dial used.
+func (rs *routeState) setRoute(id, route string) {
+	rs.mu.Lock()
+	if rs.route == nil {
+		rs.route = map[string]string{}
+	}
+	rs.route[id] = route
+	rs.mu.Unlock()
+}
+
 // remoteDialer picks the transport for one internet peer: the WebRTC
 // DataChannel tunnel first (P2P — the hub sees nothing), then the
 // hub WSS relay when the tunnel cannot connect (M2 step ③). A failed
@@ -575,14 +684,33 @@ const relayOnlyEnv = "CHUNKDROP_RELAY_ONLY"
 // reports connected again. Clients are cached per peer: transport
 // pooling (idle conns) must survive the sync runner's periodic
 // peerRefs rebuilds.
+//
+// Step ④: the owner's per-peer mode (routeState) steers the choice —
+// "tunnel"/"relay" force one transport (no fallback), "off" refuses
+// the dial outright — and every successful dial records the route it
+// used, which the dashboard's Clients panel shows.
 type remoteDialer struct {
-	tun  *tunnel.Manager // nil = relay-only (relayOnlyEnv set)
-	rel  *relay.Manager
+	tun  tunnelDialer // nil = relay-only (relayOnlyEnv set)
+	rel  relayDialer
+	rs   *routeState
 	logf func(format string, args ...any)
 
 	mu       sync.Mutex
 	cooldown map[string]time.Time
 	clients  map[string]*http.Client
+}
+
+// tunnelDialer is the tunnel's dial surface (satisfied by
+// *tunnel.Manager; faked in tests).
+type tunnelDialer interface {
+	Dial(ctx context.Context, peer string) (net.Conn, error)
+	PeerConnected(peer string) bool
+}
+
+// relayDialer is the relay's dial surface (satisfied by
+// *relay.Manager; faked in tests).
+type relayDialer interface {
+	Dial(ctx context.Context, peer string) (net.Conn, error)
 }
 
 // tunnelCooldown is how long a failed tunnel dial is not retried.
@@ -608,17 +736,7 @@ func (d *remoteDialer) HTTPClient(peer string) *http.Client {
 			if got, err := tunnel.PeerFromHost(addr); err != nil || got != peer {
 				return nil, fmt.Errorf("mesh: dial for %q, client serves %q", addr, peer)
 			}
-			if d.tun != nil && d.tunnelUsable(peer) {
-				dctx, cancel := context.WithTimeout(ctx, tunnelDialTimeout)
-				conn, err := d.tun.Dial(dctx, peer)
-				cancel()
-				if err == nil {
-					return conn, nil
-				}
-				d.logf("tunnel dial to %.12s… failed (%v) — hub relay takes over", peer, err)
-				d.setCooldown(peer)
-			}
-			return d.rel.Dial(ctx, peer)
+			return d.dialPeer(ctx, peer)
 		},
 		MaxConnsPerHost:       2, // announcement + chunk stream headroom
 		MaxIdleConnsPerHost:   2,
@@ -628,6 +746,42 @@ func (d *remoteDialer) HTTPClient(peer string) *http.Client {
 	c := &http.Client{Transport: tr, Timeout: 120 * time.Second}
 	d.clients[peer] = c
 	return c
+}
+
+// dialPeer opens one connection to an internet peer, honoring its
+// mode: "off" refuses, "tunnel"/"relay" force a transport (no
+// fallback), "auto" tries the tunnel and falls back to the relay. The
+// successful transport is recorded in the route state for the
+// dashboard.
+func (d *remoteDialer) dialPeer(ctx context.Context, peer string) (net.Conn, error) {
+	if d.rs.Blocked(peer) {
+		return nil, fmt.Errorf("mesh: peer %.12s… is off (dashboard toggle)", peer)
+	}
+	mode := d.rs.Mode(peer)
+	if mode == "tunnel" && d.tun == nil {
+		return nil, fmt.Errorf("mesh: tunnel forced for %.12s… but the tunnel is off (%s)", peer, relayOnlyEnv)
+	}
+	if d.tun != nil && mode != "relay" && d.tunnelUsable(peer) {
+		dctx, cancel := context.WithTimeout(ctx, tunnelDialTimeout)
+		conn, err := d.tun.Dial(dctx, peer)
+		cancel()
+		if err == nil {
+			d.rs.setRoute(peer, "tunnel")
+			return conn, nil
+		}
+		d.logf("tunnel dial to %.12s… failed (%v) — hub relay takes over", peer, err)
+		d.setCooldown(peer)
+		if mode == "tunnel" {
+			// Forced tunnel: no silent fallback — the owner asked to
+			// see the tunnel's errors, give them to them.
+			return nil, fmt.Errorf("mesh: tunnel forced for %.12s…: %w", peer, err)
+		}
+	}
+	conn, err := d.rel.Dial(ctx, peer)
+	if err == nil {
+		d.rs.setRoute(peer, "relay")
+	}
+	return conn, err
 }
 
 // tunnelUsable reports whether a tunnel dial is worth attempting:

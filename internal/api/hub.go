@@ -22,5 +22,8 @@ func (s *Server) handleHub(w http.ResponseWriter, r *http.Request) {
 		"connected": st.Connected,
 		"lastError": st.LastError,
 		"devices":   st.Devices,
+		// Step ③ diagnosis knob, surfaced so the hub card can say
+		// "relay forced" when transfers are slow on purpose.
+		"relayOnly": s.RelayOnly,
 	})
 }

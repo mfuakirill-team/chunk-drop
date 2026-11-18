@@ -129,6 +129,14 @@ Engine A (sender)          VPS (nginx → hub in Docker)          Engine B (rece
    │    512 KiB window ⇒ ~80 Mbit/s cap; TLS-protected to the hub) ═►│
 ```
 
+Step ④ makes the route visible and steerable: the dashboard shows
+which transport each peer's traffic used (`lan`/`tunnel`/`relay`) and
+the owner can force tunnel/relay or pause a peer, per-peer
+(RAM-only; the pause is two-sided where the pulling peer is
+identifiable — the engine refuses `/api/sync/start` from paused
+peers, named by their tunnel/relay RemoteAddr or the discovery
+table).
+
 ### USB sneakernet (M4)
 
 ```

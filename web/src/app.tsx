@@ -7,7 +7,7 @@ import type { ComponentChild } from "preact";
 // can show live progress without polling the sender card.
 
 import { parseFragmentKey } from "./link";
-import { ActivityPanel, PeersPanel } from "./peers";
+import { ActivityPanel, HubPanel, PeersPanel } from "./peers";
 import { ReceivePage } from "./receive";
 import { SendPage, type SendState } from "./send";
 import { UploadPage } from "./upload";
@@ -60,6 +60,7 @@ export function App() {
         <div class="columns">
           <SendPage onStart={goReceive} onChange={setSend} />
           <div class="sidecol">
+            <HubPanel />
             <PeersPanel />
             <ActivityPanel send={send} />
           </div>

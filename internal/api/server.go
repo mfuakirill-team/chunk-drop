@@ -91,6 +91,15 @@ type Server struct {
 	groupKey  string
 	discovery PeersSource
 	hub       HubSource
+	// routes is the per-peer transport control surface (M2 step ④):
+	// route observations + the owner's per-peer modes. Nil = mesh-less
+	// engine; the peers panel then has nothing to steer.
+	routes RouteControl
+
+	// RelayOnly mirrors CHUNKDROP_RELAY_ONLY=1 (step ③ diagnosis env):
+	// shown in the hub status card so a forced relay explains slow
+	// transfers at a glance.
+	RelayOnly bool
 }
 
 // HubSource is the read side of the hub connection the server needs
@@ -127,6 +136,14 @@ func (s *Server) SetDiscovery(p PeersSource) {
 func (s *Server) SetHub(c HubSource) {
 	s.mu.Lock()
 	s.hub = c
+	s.mu.Unlock()
+}
+
+// SetRoutes swaps the per-peer route control (live rekey builds a new
+// mesh; nil = route controls off).
+func (s *Server) SetRoutes(rc RouteControl) {
+	s.mu.Lock()
+	s.routes = rc
 	s.mu.Unlock()
 }
 
@@ -195,12 +212,17 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/peers", s.localOnly(s.authStart(s.handlePeers)))
 	mux.Handle("GET /api/hub", s.localOnly(s.authStart(s.handleHub)))
 	mux.Handle("GET /api/activity", s.localOnly(s.authStart(s.handleActivity)))
+	// Per-peer transport control (M2 step ④): the dashboard steers
+	// route selection (auto/tunnel/relay) and pauses peers — local
+	// dashboard control like the rest above.
+	mux.Handle("POST /api/peer/mode", s.localOnly(s.authStart(s.handlePeerMode)))
 	mux.HandleFunc("GET /api/sync/state", s.authStart(s.handleSyncState))
 	mux.HandleFunc("POST /api/sync/start", s.authStart(s.handleSyncStart))
 
-	// Dashboard sets the group key (M2): local-only; when a key is
-	// already configured, the current key must be presented (it is the
-	// dashboard credential — a key change must not be drive-by).
+	// Dashboard sets the group key (M2): local-only; the drive-by gate
+	// is the same-page stamp (HeaderUI + Origin), NOT the current key —
+	// a browser that lost its saved copy just retypes the key
+	// (internal/api/keys.go).
 	mux.Handle("POST /api/key", s.localOnly(http.HandlerFunc(s.handleKeySet)))
 
 	// Phone→PC push (M1, PROTOCOL.md §4 upload table). Slot creation

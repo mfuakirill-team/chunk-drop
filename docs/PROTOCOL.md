@@ -116,7 +116,7 @@ devices by design.
 | 🔒 `POST /api/start` | Create a transfer session from engine-local paths; body `{"paths":["…"],"zip":bool}` |
 | 🔒 `POST /api/pick/files` | Open a native multi-file dialog **on the engine**, return chosen paths |
 | 🔒 `POST /api/pick/folder` | Same, for a recursive folder pick |
-| 🔒 `GET /api/peers` | LAN discovery view: `{"self":{…},"peers":[{id,name,ip,port}…]}` |
+| 🔒 `GET /api/peers` | LAN discovery view: `{"self":{…},"peers":[{id,name,ip,port,hub,route,mode}…]}` — `hub` marks internet reachability; `route`/`mode` are step ④ (see below) |
 | `GET /api/sync/state` | This engine's shared-folder announcement: `{"files":{rel:{size,mtime,xxh}},"deleted":{rel:mtime}}` |
 | `POST /api/sync/start` | Body `{"rels":["…"]}` → session serving those files for a peer |
 | 🔒 `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries],"incoming":[phone pushes in progress]}` |
@@ -142,6 +142,31 @@ look local) but can supply neither stamp, so it gets `401`. The key
 applies instantly (mesh rekeys); only the engine.toml write is deferred
 (~20 s, flushed on shutdown). Typing the key that is already set is a
 harmless no-op (`{"applied":false}`).
+
+| 🔒 `POST /api/peer/mode` | Per-peer transport control (step ④): body `{"id":"<deviceID>","mode":"auto|tunnel|relay|off"}` → `{"ok":true}` — see below |
+
+**Per-peer route state and controls (M2 step ④).** `GET /api/peers`
+rows carry `route` (`"lan"` for LAN peers; `"tunnel"`/`"relay"` for
+internet peers — the transport their last dial actually used) and
+`mode` (the owner's per-peer setting, `"auto"` default). The dashboard
+steers each peer with `POST /api/peer/mode`:
+
+- `auto` — default routing: LAN direct; tunnel first, hub-relay
+  fallback for internet peers.
+- `tunnel` / `relay` — force one transport (no silent fallback; the
+  tunnel's errors surface instead).
+- `off` — pause sync with that peer, **two-sided**: the peer is
+  dropped from this engine's mesh peer list (no pulls, no
+  announcements to it), and when it pulls from this engine the
+  request is refused — the pulling peer is identifiable because
+  tunnel/relay conns carry `tunnel:<id>`/`relay:<id>` RemoteAddrs and
+  LAN conns are named by the discovery table. An in-flight pull that
+  already holds a session key finishes.
+
+Mode state is RAM-only: a restart (or a group-key rekey, which
+rebuilds the mesh) returns every peer to `auto`. The group key keeps
+authenticating the mesh itself — pausing a peer is a routing/pause
+decision, not a trust revocation (rotate the key to revoke, §2.1).
 
 Sync normative details:
 - **In-progress pull temp files are never announced or planned.** A
