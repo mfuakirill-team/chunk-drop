@@ -68,6 +68,19 @@ button {
 button:disabled { opacity: 0.5; cursor: default; }
 button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
 
+/* .seg: segmented switch (mesh mode card) — big, clearly one-choice. */
+.seg { display: flex; gap: 6px; }
+.seg button {
+  flex: 1;
+  padding: 10px 0;
+  font-size: 14px;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+.seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.seg button:disabled { opacity: 1; }
+
 /* label.bigbtn: a <label> wrapping a hidden file input, styled like a
    button so the phone upload page gets native picker affordances. */
 label.bigbtn {

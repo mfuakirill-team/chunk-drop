@@ -14,6 +14,7 @@ import (
 	"chunkdrop/internal/discovery"
 	"chunkdrop/internal/hubclient"
 	"chunkdrop/internal/logx"
+	"chunkdrop/internal/ratemeter"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
 	"chunkdrop/internal/upload"
@@ -83,23 +84,44 @@ type Server struct {
 	// Called synchronously; the receiver owns debouncing/persistence.
 	OnKey func(key string)
 
+	// OnMode applies a global mesh mode ("auto"|"local"|"internet")
+	// submitted via POST /api/mode (M2 step ④): the engine rebuilds the
+	// mesh for it and persists it in engine.toml. An error refuses the
+	// switch (500). nil = the endpoint is read-only (GET still works).
+	OnMode func(mode string) error
+
 	// mu guards the live-swappable mesh state below: the dashboard
 	// group key can be replaced at runtime (POST /api/key), which
 	// swaps the discovery service and hub client under a running
 	// HTTP server.
 	mu        sync.RWMutex
 	groupKey  string
+	meshMode  string // global mesh mode: auto | local | internet
 	discovery PeersSource
 	hub       HubSource
-	// routes is the per-peer transport control surface (M2 step ④):
-	// route observations + the owner's per-peer modes. Nil = mesh-less
-	// engine; the peers panel then has nothing to steer.
-	routes RouteControl
+
+	// uploadRates is fed by the chunk handler: bytes served to each
+	// mesh client (the Clients card's "upload" column). The peer is
+	// identified by requestPeerID — tunnel/relay RemoteAddr prefixes
+	// and the LAN discovery table.
+	uploadRates *ratemeter.Meter
+
+	// DownloadRates is the syncmesh puller's per-peer rate source (the
+	// Clients card's "download" column). Set by the engine when the
+	// mesh builds; nil = no rows. Satisfied by *ratemeter.Meter.
+	DownloadRates RateSource
 
 	// RelayOnly mirrors CHUNKDROP_RELAY_ONLY=1 (step ③ diagnosis env):
 	// shown in the hub status card so a forced relay explains slow
 	// transfers at a glance.
 	RelayOnly bool
+}
+
+// RateSource is a per-peer bytes-per-second snapshot (ratemeter.Meter
+// satisfies it; the syncmesh puller's meter and the chunk handler's
+// meter both surface through it).
+type RateSource interface {
+	Rates() map[string]float64
 }
 
 // HubSource is the read side of the hub connection the server needs
@@ -139,12 +161,29 @@ func (s *Server) SetHub(c HubSource) {
 	s.mu.Unlock()
 }
 
-// SetRoutes swaps the per-peer route control (live rekey builds a new
-// mesh; nil = route controls off).
-func (s *Server) SetRoutes(rc RouteControl) {
+// SetMeshMode stores the engine's current global mesh mode (the
+// engine's own state, synced from engine.toml / POST /api/mode).
+func (s *Server) SetMeshMode(mode string) {
 	s.mu.Lock()
-	s.routes = rc
+	s.meshMode = mode
 	s.mu.Unlock()
+}
+
+// MeshMode snapshots the current global mesh mode ("" = unset legacy
+// config; the UI treats it as auto).
+func (s *Server) MeshMode() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.meshMode
+}
+
+// UploadRates snapshots bytes-per-second per served peer (the Clients
+// card's upload column).
+func (s *Server) UploadRates() map[string]float64 {
+	if s.uploadRates == nil {
+		return nil
+	}
+	return s.uploadRates.Rates()
 }
 
 // Picker abstracts the native dialog surface (internal/picker).
@@ -162,7 +201,11 @@ type PeersSource interface {
 
 // NewServer builds the handler tree.
 func NewServer(sm *session.Manager, ui http.Handler) *Server {
-	return &Server{Sessions: sm, UI: ui}
+	return &Server{
+		Sessions:    sm,
+		UI:          ui,
+		uploadRates: ratemeter.New(ratemeter.DefaultWindow),
+	}
 }
 
 // Handler returns the fully wired http.Handler.
@@ -212,10 +255,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/peers", s.localOnly(s.authStart(s.handlePeers)))
 	mux.Handle("GET /api/hub", s.localOnly(s.authStart(s.handleHub)))
 	mux.Handle("GET /api/activity", s.localOnly(s.authStart(s.handleActivity)))
-	// Per-peer transport control (M2 step ④): the dashboard steers
-	// route selection (auto/tunnel/relay) and pauses peers — local
-	// dashboard control like the rest above.
-	mux.Handle("POST /api/peer/mode", s.localOnly(s.authStart(s.handlePeerMode)))
+	// Global mesh mode (M2 step ④ rework): how THIS engine interacts
+	// with all other peers — auto / local / internet. One switch for
+	// the whole mesh, persisted in engine.toml; the Clients card shows
+	// who is connected, not how.
+	mux.Handle("GET /api/mode", s.localOnly(s.authStart(s.handleModeGet)))
+	mux.Handle("POST /api/mode", s.localOnly(s.authStart(s.handleModeSet)))
 	mux.HandleFunc("GET /api/sync/state", s.authStart(s.handleSyncState))
 	mux.HandleFunc("POST /api/sync/start", s.authStart(s.handleSyncStart))
 

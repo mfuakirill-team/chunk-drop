@@ -117,6 +117,7 @@ Edit `engine.toml`; restart the engine after changes.
 | `bind_ip` | *(auto)* | LAN address to advertise in QR links. Only set it if auto-detect picks the wrong adapter (see §5.4 — auto-detect prefers the adapter with the default route and demotes virtual/VPN adapters). |
 | `hub_url` | `wss://drop.404.mn/hub/ws` (fresh installs) | Hub websocket endpoint. Empty (explicitly set in an older config) = internet mesh off: LAN-only, M0/M1 behavior. |
 | `stun_url` | `stun:drop.404.mn:3478` (fresh installs) | STUN server for WebRTC NAT traversal. Empty is fine on a plain LAN. |
+| `mesh_mode` | `auto` | Global mesh mode (§4.2.1): `auto` (LAN + internet), `local` (LAN only, hub off) or `internet` (hub only). The dashboard's Mesh mode card writes this; hand-editing works too. |
 | `allow_remote_dashboard` | `false` | Dashboard/control access from **other devices**. Off: the dashboard works only on the engine machine itself (loopback or its own LAN address); other devices get a 404 even with the group key. Turn on only for headless engines (e.g. a NAS whose dashboard you open from a laptop). Receiving links always work from other devices regardless. |
 | `receive_dir` | *(M1)* | Where received uploads land (upload direction ships in M1). |
 | `max_upload_bytes` | `106253862144` | Per-transfer upload cap (M1). Ignore for now. |
@@ -211,9 +212,9 @@ program: presence + WebRTC signaling, no LAN, no files) — see
 2. **Pick files…** (multi-select) or **Pick folder…** (recursive walk).
    - Selected paths appear in their own **frame** (blue border) with a
      **Reset selection** button — obvious what's about to be sent.
-   - "pack many small files as store-mode ZIP" is optional; for folders
-     it can be handy on phones (one file to save instead of a tree).
-     It's a ZIP with **no compression** (store mode) — near-instant pack.
+   - "pack files as ZIP" is optional; for folders it can be handy on
+     phones (one file to save instead of a tree). It's a ZIP with
+     **no compression** (store mode) — near-instant pack.
 3. **Start transfer** → the engine hashes chunks on the fly (SHA-256 per
    4 MiB chunk) → a **QR code** appears. **Cancel** (right of Start)
    ends the session.
@@ -242,33 +243,36 @@ subnet). Nothing installed, no account, no app.
 button): works, but saving needs a desktop browser with the File System
 Access API (Chrome/Edge/Chromium on Windows/Linux).
 
-### 4.2.1 The Clients + Activity frames (sender side)
-The **Internet mesh** card (M2 step ⑤) sits above the Clients card:
-whether the engine is connected to the hub (`hub_url`), which group
-members are online there, the last connection error while
-reconnecting, and a `⚠ relay forced` note when `CHUNKDROP_RELAY_ONLY=1`
-is set. No hub configured → the card says so and the LAN keeps
-working.
+### 4.2.1 The Mesh mode + Clients + Activity frames (sender side)
+The **Mesh mode** card (M2 step ④) sits above the Clients card: three
+big buttons — **Auto / Local / Internet** — one switch for the whole
+device. It decides how THIS engine interacts with ALL clients:
 
-The **Clients** card lists the whole mesh, joined by the persistent
+- **Auto** — everything: LAN clients direct, internet clients via the
+  hub (device-to-device tunnel first, hub relay when hole-punching
+  fails).
+- **Local** — the local network only. The hub connection is dropped
+  entirely (no presence, no internet clients).
+- **Internet** — the global internet only. LAN-discovered clients are
+  skipped; the hub routes carry everything.
+
+The engine applies the switch instantly (the mesh rebuilds, no
+restart) and remembers it in `engine.toml` — it survives a restart.
+
+The **Clients** card lists who is connected, joined by the persistent
 device ID (LAN beacons and hub presence carry the same ID):
 
 - **LAN clients** show their IP in the `ip/id` column.
-- **🌐** marks a client that is *also* reachable over the internet via
-  the hub (or only via the hub).
+- **🌐** marks a client that is reachable over the internet via the
+  hub (or only via the hub).
 - **Internet-only clients** have no LAN address — the `ip/id` column
   shows the first characters of their device ID (hover for the full
   ID); their `port` is blank.
-- **Route** (M2 step ④): what the client's traffic actually used —
-  `lan` direct, `🌐 tunnel` (device-to-device, the hub sees nothing)
-  or `🌐 relay` (through the hub — expected when hole-punching fails).
-- **Mode** (M2 step ④): a per-peer select. `auto` is the default
-  routing; `tunnel`/`relay` force one transport for that peer (no
-  fallback — for diagnosing NAT cases); `⏸ off` pauses sync with that
-  peer **in both directions** — this engine stops pulling from it and
-  refuses its pulls. Toggles live in RAM: a restart returns everyone
-  to `auto`. Pausing is not revoking — rotate the group key (§2.1) to
-  cut a member off for good.
+- **▼ down** — bytes/s this engine is pulling FROM that client (sync
+  folder transfers, verified chunks).
+- **▲ up** — bytes/s this engine is serving TO that client.
+- Both are live 5 s averages, refreshed every 3 s; "–" means idle
+  (no transfer right now), not zero speed.
 
 Below it sits its own **Activity** card showing:
 
@@ -286,9 +290,8 @@ Below it sits its own **Activity** card showing:
   line settles into `✓ phone sent N file(s) — … — batch done, link
   still open` (the QR stays valid for "Send more").
 
-Both panels are views; the only control is the Clients card's per-peer
-**mode** select (route choice / pause, M2 step ④) — nothing here
-changes a running transfer.
+Both panels are views — the mode switch lives above them, and nothing
+here changes a running transfer.
 
 ### 4.3 Cancel / stop / close mid-transfer
 
@@ -558,8 +561,8 @@ configure.
 
 | Symptom | Cause / fix |
 |---|---|
-| Peer visible in the peers panel but sync stalls | `--debug` shows `tunnel`/`relay` lines: `relay takes over` means the tunnel could not connect and the hub relay is carrying the traffic (slow but working). The Clients card's **route** column shows the same at a glance. |
-| Want to test whether the relay path works | Run the engine with `CHUNKDROP_RELAY_ONLY=1` — it skips the tunnel entirely; if sync works then, the hub path is fine and the NAT/tunnel is the problem. Or set just that peer to `relay` in the Clients card's **mode** column (per-peer, no restart). |
+| Peer visible in the peers panel but sync stalls | `--debug` shows `tunnel`/`relay` lines: `relay takes over` means the tunnel could not connect and the hub relay is carrying the traffic (slow but working). |
+| Want to test whether the relay path works | Run the engine with `CHUNKDROP_RELAY_ONLY=1` — it skips the tunnel entirely; if sync works then, the hub path is fine and the NAT/tunnel is the problem. |
 | Peer visible but not syncing at all | Check the Clients card's **mode** column: `⏸ off` pauses sync with that peer in both directions. Set it back to `auto`. Toggles reset on restart. |
 | Relay transfers are slow | Expected: everything goes through the VPS (~80 Mbit/s ceiling at a 50 ms RTT, shared with signaling). It is a fallback, not the default route. |
 
@@ -644,7 +647,7 @@ browser, and the exact step from this guide.
 | Engine in Docker (LAN machine, deploy/) | ❌ removed in M2 — engine is a plain binary (§3.1) |
 | VPS hub: presence + WebRTC signaling + WSS relay fallback | ✅ step ③ (`DEPLOY-VPS.md`) |
 | Upload direction (phone → PC) | ✅ M1 |
-| Internet mode via VPS hub | ✅ M2 steps ①–⑤ (presence, tunnel, relay fallback, per-peer route controls, hub status card) |
+| Internet mode via VPS hub | ✅ M2 steps ①–⑤ (presence, tunnel, relay fallback, global mesh mode, live speed columns) |
 | Resume-after-close for receivers | ⬜ M3 |
 | Real-device test matrix (iPhone/Android/Windows engines) | ⬜ needs hardware |
 | Service worker / offline caching | ⬜ deliberately none (§4.9) |

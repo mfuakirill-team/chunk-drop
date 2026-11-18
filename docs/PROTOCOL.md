@@ -116,7 +116,7 @@ devices by design.
 | 🔒 `POST /api/start` | Create a transfer session from engine-local paths; body `{"paths":["…"],"zip":bool}` |
 | 🔒 `POST /api/pick/files` | Open a native multi-file dialog **on the engine**, return chosen paths |
 | 🔒 `POST /api/pick/folder` | Same, for a recursive folder pick |
-| 🔒 `GET /api/peers` | LAN discovery view: `{"self":{…},"peers":[{id,name,ip,port,hub,route,mode}…]}` — `hub` marks internet reachability; `route`/`mode` are step ④ (see below) |
+| 🔒 `GET /api/peers` | Mesh client view: `{"self":{…},"peers":[{id,name,ip,port,hub,down,up}…]}` — `hub` marks internet reachability; `down`/`up` are live transfer rates in bytes/s (see below). LAN rows are omitted entirely while the mesh mode is `internet` |
 | `GET /api/sync/state` | This engine's shared-folder announcement: `{"files":{rel:{size,mtime,xxh}},"deleted":{rel:mtime}}` |
 | `POST /api/sync/start` | Body `{"rels":["…"]}` → session serving those files for a peer |
 | 🔒 `GET /api/activity` | Concise feed: `{"events":[{time,kind,msg}],"uploads":[live session summaries],"incoming":[phone pushes in progress]}` |
@@ -143,30 +143,37 @@ applies instantly (mesh rekeys); only the engine.toml write is deferred
 (~20 s, flushed on shutdown). Typing the key that is already set is a
 harmless no-op (`{"applied":false}`).
 
-| 🔒 `POST /api/peer/mode` | Per-peer transport control (step ④): body `{"id":"<deviceID>","mode":"auto|tunnel|relay|off"}` → `{"ok":true}` — see below |
+| 🔒 `GET /api/mode` | Current global mesh mode: `{"mode":"auto","modes":["auto","local","internet"]}` — see below |
+| 🔒 `POST /api/mode` | Switch the global mesh mode: body `{"mode":"auto|local|internet"}` → `{"ok":true,"mode":…}` — see below |
 
-**Per-peer route state and controls (M2 step ④).** `GET /api/peers`
-rows carry `route` (`"lan"` for LAN peers; `"tunnel"`/`"relay"` for
-internet peers — the transport their last dial actually used) and
-`mode` (the owner's per-peer setting, `"auto"` default). The dashboard
-steers each peer with `POST /api/peer/mode`:
+**The global mesh mode (M2 step ④).** ONE switch that says how THIS
+engine interacts with all other peers — there is nothing per-peer to
+configure. The dashboard reads it (`GET /api/mode`) and switches it
+(`POST /api/mode`); the engine rebuilds the mesh immediately (same
+stop/start as a group-key rekey) and persists the choice in
+`engine.toml` (`mesh_mode`, default `auto`) after a short debounce, so
+it survives a restart:
 
-- `auto` — default routing: LAN direct; tunnel first, hub-relay
-  fallback for internet peers.
-- `tunnel` / `relay` — force one transport (no silent fallback; the
-  tunnel's errors surface instead).
-- `off` — pause sync with that peer, **two-sided**: the peer is
-  dropped from this engine's mesh peer list (no pulls, no
-  announcements to it), and when it pulls from this engine the
-  request is refused — the pulling peer is identifiable because
-  tunnel/relay conns carry `tunnel:<id>`/`relay:<id>` RemoteAddrs and
-  LAN conns are named by the discovery table. An in-flight pull that
-  already holds a session key finishes.
+- `auto` — everything: LAN peers direct, internet peers via the hub
+  (tunnel first, relay fallback). A peer visible both ways uses the
+  direct LAN route.
+- `local` — the local network only. The hub connection is **dropped
+  entirely** (no presence, no hub peers, no relay); the engine logs
+  `mesh mode local — hub off, local network only`.
+- `internet` — the global internet only: LAN-discovered peers are
+  skipped (they do not appear in `/api/peers` and are not synced
+  with); peers join via `hub_url`/`stun_url` (tunnel first, relay
+  fallback).
 
-Mode state is RAM-only: a restart (or a group-key rekey, which
-rebuilds the mesh) returns every peer to `auto`. The group key keeps
-authenticating the mesh itself — pausing a peer is a routing/pause
-decision, not a trust revocation (rotate the key to revoke, §2.1).
+Discovery stays on in every mode — announcing is passive (beacons
+carry no traffic); the mode only gates the mesh itself.
+
+**Live transfer rates.** `/api/peers` rows also carry `down` (bytes/s
+this engine pulls FROM that client, metered at verified chunk writes
+in the syncmesh puller) and `up` (bytes/s it serves TO that client,
+metered in the chunk handler). Both are rolling 5 s averages; idle
+peers report `0` — the dashboard shows "–", not 0. Phones (session-key
+receivers) have no mesh identity and are not attributed.
 
 Sync normative details:
 - **In-progress pull temp files are never announced or planned.** A

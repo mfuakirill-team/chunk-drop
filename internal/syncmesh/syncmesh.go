@@ -40,6 +40,7 @@ import (
 	"chunkdrop/internal/activity"
 	"chunkdrop/internal/diskspace"
 	"chunkdrop/internal/logx"
+	"chunkdrop/internal/ratemeter"
 	"chunkdrop/internal/transfer"
 
 	"github.com/cespare/xxhash/v2"
@@ -761,6 +762,9 @@ type Puller struct {
 	// declared size on the sync folder's filesystem and the
 	// reservation shrinks as chunks land. Nil disables the check.
 	Space diskspace.Ledger
+	// Rates records per-peer download bytes (verified chunks only) for
+	// the dashboard's Clients card. Nil = unmetered.
+	Rates *ratemeter.Meter
 }
 
 // State fetches a peer's announcement (GET /api/sync/state).
@@ -918,6 +922,9 @@ func (p *Puller) Pull(l *Local, n *Needed, peers []PeerRef) error {
 				continue // bad bytes from this peer: next one
 			}
 			bytes, ok = b, true
+			if p.Rates != nil {
+				p.Rates.Add(pe.EngineID, int64(len(b)))
+			}
 			break
 		}
 		if !ok {

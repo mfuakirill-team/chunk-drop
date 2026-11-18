@@ -219,7 +219,7 @@ export function SendPage({ onStart, onChange }: Props) {
               checked={zip}
               onChange={(e) => setZip((e.target as HTMLInputElement).checked)}
             />{" "}
-            pack many small files as store-mode ZIP
+            pack files as ZIP
           </label>
         </p>
         <p>
@@ -248,7 +248,7 @@ export function SendPage({ onStart, onChange }: Props) {
                 <strong>
                   {paths.length} path{paths.length === 1 ? "" : "s"} selected
                 </strong>
-                {zip ? " → bundle.zip (store mode)" : ""}
+                {zip ? " → bundle.zip" : ""}
                 {" "}
                 <button class="secondary" style="padding:2px 10px" onClick={reset}>
                   Reset selection

@@ -129,13 +129,15 @@ Engine A (sender)          VPS (nginx → hub in Docker)          Engine B (rece
    │    512 KiB window ⇒ ~80 Mbit/s cap; TLS-protected to the hub) ═►│
 ```
 
-Step ④ makes the route visible and steerable: the dashboard shows
-which transport each peer's traffic used (`lan`/`tunnel`/`relay`) and
-the owner can force tunnel/relay or pause a peer, per-peer
-(RAM-only; the pause is two-sided where the pulling peer is
-identifiable — the engine refuses `/api/sync/start` from paused
-peers, named by their tunnel/relay RemoteAddr or the discovery
-table).
+Step ④ is one global switch, not per-peer settings: the dashboard's
+Mesh mode card (auto / local / internet, engine.toml `mesh_mode`,
+default `auto`) decides how THIS engine interacts with all peers —
+`local` drops the hub entirely, `internet` skips LAN-discovered peers,
+`auto` uses both. The mesh rebuilds on a switch (same stop/start as a
+rekey); the choice persists. The Clients card shows who is connected
+with live per-client rates: ▼ what this engine pulls from each client,
+▲ what it serves to each (rolling 5 s meters on the puller's verified
+chunk writes and the chunk handler's served bytes).
 
 ### USB sneakernet (M4)
 

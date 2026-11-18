@@ -30,6 +30,9 @@ const (
 	DefaultPort    = 8090
 	DefaultMaxBody = 512 << 20 // progress/manifest POST cap: generous but finite
 
+	// MeshModeAuto is the default mesh mode: LAN and internet both on.
+	MeshModeAuto = "auto"
+
 	// DefaultHubURL / DefaultStunURL preconfigure the internet mesh in
 	// fresh installs and first-run templates: the user runs the engine
 	// and the hub is already wired up. An engine.toml that *explicitly*
@@ -74,7 +77,33 @@ type Config struct {
 	// for WebRTC server-reflexive candidates when punching through
 	// NATs. Empty is fine on a plain LAN (host candidates suffice).
 	StunURL string `toml:"stun_url"`
+
+	// MeshMode is the global mesh mode (M2 step ④): how THIS engine
+	// interacts with all other peers. One of:
+	//
+	//   - "auto"      — everything: LAN peers direct, internet peers
+	//     via the hub (tunnel first, relay fallback).
+	//   - "local"     — the local network only: the hub connection is
+	//     dropped entirely; the Clients card shows LAN engines.
+	//   - "internet"  — the global internet only: LAN-discovered peers
+	//     are skipped; peers join via hub_url/stun_url (tunnel first,
+	//     relay fallback).
+	//
+	// Persisted (the dashboard's mode switch writes it) so the choice
+	// survives a restart. Empty/unknown → auto.
+	MeshMode string `toml:"mesh_mode"`
 }
+
+// Mesh mode vocabulary (MeshMode above; validated at load and at the
+// /api/mode endpoint).
+var MeshModes = map[string]bool{
+	"auto":     true,
+	"local":    true,
+	"internet": true,
+}
+
+// ValidMeshMode reports whether s is an accepted mesh mode value.
+func ValidMeshMode(s string) bool { return MeshModes[s] }
 
 // Default returns the built-in defaults (used when no config file exists —
 // the engine then prints a fresh group key hint on first run).
@@ -85,6 +114,7 @@ func Default() Config {
 		ReceiveDir:     "",
 		HubURL:         DefaultHubURL,
 		StunURL:        DefaultStunURL,
+		MeshMode:       MeshModeAuto,
 	}
 }
 
@@ -95,6 +125,9 @@ func Load() (Config, string, error) {
 		return Default(), "", err
 	}
 	cfg := Default()
+	if cfg.MeshMode == "" {
+		cfg.MeshMode = MeshModeAuto
+	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return cfg, path, fmt.Errorf("create config dir: %w", err)
@@ -126,6 +159,10 @@ func Load() (Config, string, error) {
 	}
 	if cfg.MaxUploadBytes == 0 {
 		cfg.MaxUploadBytes = 100 << 30
+	}
+	// Mesh mode: empty (old config files) or a typo → auto.
+	if !ValidMeshMode(cfg.MeshMode) {
+		cfg.MeshMode = MeshModeAuto
 	}
 	// Env fallback (Docker): a key in the environment beats "no key yet".
 	if cfg.GroupKey == "" || strings.Contains(cfg.GroupKey, "<paste") {
@@ -219,13 +256,36 @@ func SaveGroupKey(path, key string) error {
 	if !ValidKey(key) {
 		return fmt.Errorf("refusing to save invalid group key")
 	}
+	return saveTOMLLine(path, "group_key", `"`+key+`"`)
+}
+
+// SaveMeshMode rewrites the mesh_mode line in the engine.toml at path
+// (M2 step ④): the dashboard's global mode switch persists here so the
+// choice survives a restart. Same file rules as SaveGroupKey.
+func SaveMeshMode(path, mode string) error {
+	if !ValidMeshMode(mode) {
+		return fmt.Errorf("refusing to save unknown mesh mode %q", mode)
+	}
+	return saveTOMLLine(path, "mesh_mode", `"`+mode+`"`)
+}
+
+// saveTOMLLine rewrites `key = <value>` in the TOML file at path,
+// preserving everything else (comments, field order). Missing key line
+// → appended at the end; missing file → a fresh Default() template
+// with the field set. Written 0600.
+func saveTOMLLine(path, key, value string) error {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return fmt.Errorf("create config dir: %w", err)
 		}
 		tmpl := Default()
-		tmpl.GroupKey = key
+		if m, ok := map[string]*string{
+			"group_key": &tmpl.GroupKey,
+			"mesh_mode": &tmpl.MeshMode,
+		}[key]; ok {
+			*m = strings.Trim(value, `"`)
+		}
 		b, err := toml.Marshal(tmpl)
 		if err != nil {
 			return err
@@ -235,8 +295,8 @@ func SaveGroupKey(path, key string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	line := []byte(`group_key = "` + key + `"`)
-	re := regexp.MustCompile(`(?m)^[ \t]*group_key[ \t]*=.*$`)
+	line := []byte(key + " = " + value)
+	re := regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(key) + `[ \t]*=.*$`)
 	if re.Match(data) {
 		data = re.ReplaceAll(data, line)
 	} else {

@@ -121,7 +121,13 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(ChunkHashHeader, file.Hashes[c])
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = m.ChunkStreamer(f, c, w) // headers are out; abort quietly on I/O error
+	n, _ := m.ChunkStreamer(f, c, w) // headers are out; abort quietly on I/O error
+	// Serve-side rate attribution (M2 step ④ rework): bytes handed to
+	// a mesh peer light its Clients-card "upload" column. The peer is
+	// identified by its transport (tunnel/relay RemoteAddr prefix,
+	// LAN via discovery); phones (session-key receivers) have no
+	// mesh identity and are simply not counted.
+	s.uploadRates.Add(requestPeerID(r, s.discoverySnapshot()), n)
 }
 
 // handleProgress stores the receiver's chunk bitmap POST (≤ 8 MiB body).

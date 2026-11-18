@@ -36,6 +36,7 @@ import (
 	"chunkdrop/internal/lanip"
 	"chunkdrop/internal/logx"
 	"chunkdrop/internal/picker"
+	"chunkdrop/internal/ratemeter"
 	"chunkdrop/internal/relay"
 	"chunkdrop/internal/session"
 	"chunkdrop/internal/syncmesh"
@@ -256,7 +257,10 @@ func run(portFlag int, bindFlag string, noBrowser bool) error {
 	// built per group key. The dashboard can replace the key at
 	// runtime (POST /api/key) — the mesh is stopped and rebuilt live,
 	// no engine restart. One instance lives at a time (keyApplier).
-	applier := &keyApplier{cfgPath: cfgPath, deps: meshDeps{
+	// The global mesh mode (M2 step ④ rework: engine.toml mesh_mode)
+	// shapes every incarnation the same way and is switchable live
+	// (modeApplier via POST /api/mode).
+	deps := meshDeps{
 		cfg:      cfg,
 		ident:    ident,
 		deviceID: deviceID,
@@ -267,9 +271,19 @@ func run(portFlag int, bindFlag string, noBrowser bool) error {
 		space:    space,
 		local:    local,
 		handler:  handler,
-	}}
+		mode:     cfg.MeshMode,
+		cfgPath:  cfgPath,
+	}
+	applier := &keyApplier{cfgPath: cfgPath, deps: deps}
 	applier.rekey(cfg.GroupKey)
 	srv.OnKey = applier.Stage
+	srv.SetMeshMode(cfg.MeshMode)
+	srv.OnMode = (&modeApplier{
+		cfgPath: cfgPath,
+		keys:    applier,
+		deps:    &applier.deps,
+		srv:     srv,
+	}).Apply
 
 	// Phone→PC push (M1, PROTOCOL.md §4 upload table): RAM-only upload
 	// sessions, gated by the upload key minted via /api/upload/new.
@@ -390,7 +404,10 @@ func itoa(p int) string {
 
 // meshDeps is everything the mesh runtime needs that does NOT change
 // on a live rekey: identity, engine config (hub/stun URLs), server
-// wiring, the shared-folder state and the disk-space ledger.
+// wiring, the shared-folder state and the disk-space ledger. mode is
+// the global mesh mode — it changes independently of the key (the
+// dashboard's mode switch), so it is updated under the applier's lock
+// right before a rebuild.
 type meshDeps struct {
 	cfg      config.Config
 	ident    *device.Identity
@@ -402,6 +419,8 @@ type meshDeps struct {
 	space    diskspace.Ledger
 	local    *syncmesh.Local
 	handler  http.Handler
+	mode     string // global mesh mode: auto | local | internet
+	cfgPath  string // engine.toml, for the mode applier's persistence
 }
 
 // meshRuntime is one live mesh incarnation: the discovery service,
@@ -415,7 +434,6 @@ type meshRuntime struct {
 	relay     *relay.Manager // step ③ fallback: mesh HTTP over the hub WSS
 	relaySrv  *http.Server
 	dial      *remoteDialer // per-peer transport choice (tunnel → relay)
-	rs        *routeState   // per-peer modes + route observations (step ④)
 	stopFn    func()        // extra teardown (the sync runner), chained first
 }
 
@@ -444,26 +462,27 @@ func (m *meshRuntime) stop() {
 // it: discovery beacons go out, the hub client (re)connects, the
 // syncmesh runner starts polling. Replacing the key = stop the old
 // incarnation, start a new one (keyApplier.rekey).
+//
+// The global mesh mode (d.mode, M2 step ④ rework) shapes the mesh:
+// "local" skips the hub entirely (no presence, LAN only), "internet"
+// keeps only the hub routes (peerRefs skips LAN-discovered peers).
 func startMesh(key string, d meshDeps) *meshRuntime {
 	m := &meshRuntime{}
 
-	// Per-peer controls (M2 step ④): one state per incarnation, owned
-	// by the dialer (route choice) and peerRefs (blocks), read and
-	// driven by the dashboard. A rekey builds a fresh one — toggles
-	// describe this run, they are not config.
-	m.rs = &routeState{}
-	d.srv.SetRoutes(m.rs)
-
 	// LAN discovery (#5/#7): UDP broadcast beacons authenticated by
 	// an HMAC of the group key; inactive when no key is configured.
+	// It stays on in every mode — announcing is passive (beacons
+	// carry no traffic); the mode gates the actual mesh below.
 	m.disc = discService(key, d.deviceID, d.name, d.port)
 	d.srv.SetDiscovery(m.disc)
 	go func() { m.disc.Run() }()
 
 	// Hub connection (M2 step ①): online presence of the internet
 	// mesh. Optional (hub_url empty = off); LAN behavior is unchanged.
-	// The client reconnects forever on its own with backoff.
-	if d.cfg.HubURL != "" && config.UsableKey(key) && d.ident != nil {
+	// "local" mode drops the hub entirely — the user chose the local
+	// network, so no presence, no hub peers, no relay. The client
+	// reconnects forever on its own with backoff.
+	if d.mode != "local" && d.cfg.HubURL != "" && config.UsableKey(key) && d.ident != nil {
 		m.hub = hubclient.New(d.cfg.HubURL, key, d.ident, logx.Adapter(logx.LevelInfo, "hub"))
 		// m.tunnelMgr is the M2 step ② WebRTC tunnel: DataChannels
 		// carrying the mesh HTTP protocol to hub peers. CHUNKDROP_
@@ -497,30 +516,45 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 			IdleTimeout:       2 * time.Minute,
 		}
 		go m.relaySrv.Serve(m.relay.Listener())
-		// Per-peer transport choice: tunnel first, relay fallback,
-		// steered by the owner's per-peer modes (step ④). The tunnel
-		// field must be a true nil interface when relayOnlyEnv skips
-		// the tunnel — a typed-nil *Manager would pass the nil check
-		// and panic on dial.
+		// Per-peer transport choice: tunnel first, relay fallback. The
+		// tunnel field must be a true nil interface when relayOnlyEnv
+		// skips the tunnel — a typed-nil *Manager would pass the nil
+		// check and panic on dial.
 		var tunIf tunnelDialer
 		if m.tunnelMgr != nil {
 			tunIf = m.tunnelMgr
 		}
-		m.dial = &remoteDialer{tun: tunIf, rel: m.relay, rs: m.rs, logf: logx.Adapter(logx.LevelInfo, "mesh")}
+		m.dial = &remoteDialer{tun: tunIf, rel: m.relay, logf: logx.Adapter(logx.LevelInfo, "mesh")}
 		d.srv.SetHub(m.hub)
 		if m.tunnelMgr != nil {
 			log.Printf("hub: %s — internet mesh on", d.cfg.HubURL)
 		} else {
 			log.Printf("hub: %s — internet mesh on (relay only: %s is set)", d.cfg.HubURL, relayOnlyEnv)
 		}
-	} else if d.cfg.HubURL != "" {
-		log.Printf("hub: %s configured but unavailable (no group key yet) — internet mesh off", d.cfg.HubURL)
+	} else {
+		// No hub this incarnation (mode local / no URL / no key yet):
+		// clear whatever a previous incarnation had — the Clients
+		// card must not show hub devices that are no longer reachable.
+		d.srv.SetHub(nil)
+		if d.mode == "local" && d.cfg.HubURL != "" {
+			log.Printf("mesh mode local — hub off, local network only")
+		} else if d.cfg.HubURL != "" {
+			log.Printf("hub: %s configured but unavailable (no group key yet) — internet mesh off", d.cfg.HubURL)
+		}
 	}
 
 	// Shared-folder auto-transfer (#6): only when a key is configured
 	// (the mesh is group-key gated — syncmesh never trusts strangers).
 	if config.UsableKey(key) && d.local != nil {
-		puller := &syncmesh.Puller{GroupKey: key, Logf: logx.Adapter(logx.LevelInfo, "sync"), Act: d.act, Space: d.space}
+		pullRates := ratemeter.New(ratemeter.DefaultWindow)
+		puller := &syncmesh.Puller{
+			GroupKey: key,
+			Logf:     logx.Adapter(logx.LevelInfo, "sync"),
+			Act:      d.act,
+			Space:    d.space,
+			Rates:    pullRates, // Clients card's download column
+		}
+		d.srv.DownloadRates = pullRates
 		runner := &syncmesh.Runner{
 			Local:    d.local,
 			Puller:   puller,
@@ -545,27 +579,41 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 // peerRefs builds the syncmesh peer list: LAN beacons first (the
 // local route always wins), then hub devices join over the tunnel
 // or, when the tunnel cannot connect, the hub relay — both carry the
-// same mesh HTTP. Peers paused in the dashboard (mode "off", step ④)
-// are dropped from both halves.
+// same mesh HTTP.
+//
+// The global mesh mode (M2 step ④ rework) filters the list:
+// "internet" skips LAN-discovered peers entirely (interact via the
+// global internet, not the local network); "local" has no hub client
+// at all (startMesh dropped it), so the second half is naturally
+// empty.
 // Beacons carry the persistent device ID, the same string the hub
 // presence uses — the join is exact.
 func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 	var out []syncmesh.PeerRef
-	lanSeen := map[string]bool{}
-	for _, mem := range m.disc.Table().List() {
-		if mem.ID == m.disc.Self().ID || m.rs.Blocked(mem.ID) {
-			continue // self; or paused in the dashboard (step ④)
+	if d.mode != "internet" {
+		for _, mem := range m.disc.Table().List() {
+			if mem.ID == m.disc.Self().ID {
+				continue
+			}
+			out = append(out, syncmesh.PeerRef{
+				Host:     net.JoinHostPort(mem.IP, fmt.Sprintf("%d", mem.Port)),
+				EngineID: mem.ID,
+				Name:     mem.Name,
+			})
 		}
-		lanSeen[mem.ID] = true
-		out = append(out, syncmesh.PeerRef{
-			Host:     net.JoinHostPort(mem.IP, fmt.Sprintf("%d", mem.Port)),
-			EngineID: mem.ID,
-			Name:     mem.Name,
-		})
 	}
 	if m.hub != nil && m.dial != nil {
+		// Auto/local: a peer both LAN-visible and hub-present already
+		// has the direct route — no second (tunnel) ref. Internet: the
+		// LAN half was skipped, so every hub presence gets its route.
+		lanSeen := map[string]bool{}
+		if d.mode != "internet" {
+			for _, p := range out {
+				lanSeen[p.EngineID] = true
+			}
+		}
 		for _, dev := range m.hub.Status().Devices {
-			if dev.ID == m.disc.Self().ID || dev.ID == d.deviceID || lanSeen[dev.ID] || m.rs.Blocked(dev.ID) {
+			if dev.ID == m.disc.Self().ID || dev.ID == d.deviceID || lanSeen[dev.ID] {
 				continue
 			}
 			out = append(out, syncmesh.PeerRef{
@@ -585,96 +633,6 @@ func peerRefs(m *meshRuntime, d meshDeps) []syncmesh.PeerRef {
 // routing.
 const relayOnlyEnv = "CHUNKDROP_RELAY_ONLY"
 
-// routeState owns the per-peer sync controls (M2 step ④): the owner's
-// mode per peer (auto/tunnel/relay/off) and the transport each
-// internet peer actually used last. The remoteDialer consults it for
-// every dial and records what it used; peerRefs drops "off" peers;
-// the dashboard reads and drives it via /api/peers and
-// POST /api/peer/mode (it satisfies api.RouteControl).
-//
-// RAM-only by design: toggles describe this run's debugging and
-// pausing — a restart, or a group-key rekey (which rebuilds the whole
-// mesh), returns every peer to auto. Peering changes are rare, and the
-// default (auto) is what a healthy mesh wants anyway.
-type routeState struct {
-	mu    sync.Mutex
-	modes map[string]string // deviceID → auto|tunnel|relay|off
-	route map[string]string // deviceID → tunnel|relay (last used)
-}
-
-// routeModeOff pauses sync with a peer (it leaves the mesh peer
-// list); the other modes steer route selection. "auto" is the default
-// and is stored explicitly only when the owner re-selects it.
-func (rs *routeState) SetMode(id, mode string) error {
-	if strings.TrimSpace(id) == "" {
-		return fmt.Errorf("empty peer id")
-	}
-	switch mode {
-	case "auto", "tunnel", "relay", "off":
-	default:
-		return fmt.Errorf("unknown mode %q", mode)
-	}
-	rs.mu.Lock()
-	if rs.modes == nil {
-		rs.modes = map[string]string{}
-	}
-	if mode == "auto" {
-		delete(rs.modes, id)
-	} else {
-		rs.modes[id] = mode
-	}
-	rs.mu.Unlock()
-	logx.Info("mesh", "peer %.12s… mode → %s", id, mode)
-	return nil
-}
-
-// Mode reports a peer's mode; "auto" when unset.
-func (rs *routeState) Mode(id string) string {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	if m, ok := rs.modes[id]; ok {
-		return m
-	}
-	return "auto"
-}
-
-// Blocked reports whether sync with a peer is paused (mode "off").
-func (rs *routeState) Blocked(id string) bool {
-	return rs.Mode(id) == "off"
-}
-
-// Modes snapshots deviceID → mode ("auto" filled in — the API report).
-func (rs *routeState) Modes() map[string]string {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	out := map[string]string{}
-	for id, m := range rs.modes {
-		out[id] = m
-	}
-	return out
-}
-
-// Routes snapshots deviceID → last transport used ("tunnel"/"relay").
-func (rs *routeState) Routes() map[string]string {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	out := map[string]string{}
-	for id, r := range rs.route {
-		out[id] = r
-	}
-	return out
-}
-
-// setRoute records the transport a successful dial used.
-func (rs *routeState) setRoute(id, route string) {
-	rs.mu.Lock()
-	if rs.route == nil {
-		rs.route = map[string]string{}
-	}
-	rs.route[id] = route
-	rs.mu.Unlock()
-}
-
 // remoteDialer picks the transport for one internet peer: the WebRTC
 // DataChannel tunnel first (P2P — the hub sees nothing), then the
 // hub WSS relay when the tunnel cannot connect (M2 step ③). A failed
@@ -685,14 +643,14 @@ func (rs *routeState) setRoute(id, route string) {
 // pooling (idle conns) must survive the sync runner's periodic
 // peerRefs rebuilds.
 //
-// Step ④: the owner's per-peer mode (routeState) steers the choice —
-// "tunnel"/"relay" force one transport (no fallback), "off" refuses
-// the dial outright — and every successful dial records the route it
-// used, which the dashboard's Clients panel shows.
+// The global mesh mode (M2 step ④ rework) decides WHICH peers are in
+// the mesh, not how each dial works: "internet" peers always want the
+// hub routes (tunnel → relay), "local" peers are plain LAN HTTP —
+// both handled by their own transports, so the dialer itself has
+// nothing to steer.
 type remoteDialer struct {
 	tun  tunnelDialer // nil = relay-only (relayOnlyEnv set)
 	rel  relayDialer
-	rs   *routeState
 	logf func(format string, args ...any)
 
 	mu       sync.Mutex
@@ -748,40 +706,20 @@ func (d *remoteDialer) HTTPClient(peer string) *http.Client {
 	return c
 }
 
-// dialPeer opens one connection to an internet peer, honoring its
-// mode: "off" refuses, "tunnel"/"relay" force a transport (no
-// fallback), "auto" tries the tunnel and falls back to the relay. The
-// successful transport is recorded in the route state for the
-// dashboard.
+// dialPeer opens one connection to an internet peer: tunnel first,
+// hub relay on tunnel failure (with the cooldown in between).
 func (d *remoteDialer) dialPeer(ctx context.Context, peer string) (net.Conn, error) {
-	if d.rs.Blocked(peer) {
-		return nil, fmt.Errorf("mesh: peer %.12s… is off (dashboard toggle)", peer)
-	}
-	mode := d.rs.Mode(peer)
-	if mode == "tunnel" && d.tun == nil {
-		return nil, fmt.Errorf("mesh: tunnel forced for %.12s… but the tunnel is off (%s)", peer, relayOnlyEnv)
-	}
-	if d.tun != nil && mode != "relay" && d.tunnelUsable(peer) {
+	if d.tun != nil && d.tunnelUsable(peer) {
 		dctx, cancel := context.WithTimeout(ctx, tunnelDialTimeout)
 		conn, err := d.tun.Dial(dctx, peer)
 		cancel()
 		if err == nil {
-			d.rs.setRoute(peer, "tunnel")
 			return conn, nil
 		}
 		d.logf("tunnel dial to %.12s… failed (%v) — hub relay takes over", peer, err)
 		d.setCooldown(peer)
-		if mode == "tunnel" {
-			// Forced tunnel: no silent fallback — the owner asked to
-			// see the tunnel's errors, give them to them.
-			return nil, fmt.Errorf("mesh: tunnel forced for %.12s…: %w", peer, err)
-		}
 	}
-	conn, err := d.rel.Dial(ctx, peer)
-	if err == nil {
-		d.rs.setRoute(peer, "relay")
-	}
-	return conn, err
+	return d.rel.Dial(ctx, peer)
 }
 
 // tunnelUsable reports whether a tunnel dial is worth attempting:
@@ -825,11 +763,14 @@ const keySaveDelay = 20 * time.Second
 // after keySaveDelay with the latest value (comments and other
 // settings preserved via config.SaveGroupKey). Exactly one mesh
 // incarnation is alive at a time; the engine shuts it down on exit.
+// The mesh mode applier (modeApplier) reuses it: the mode change is
+// the same stop-and-rebuild, with the current key.
 type keyApplier struct {
 	cfgPath string
 	deps    meshDeps
 
 	mu      sync.Mutex
+	key     string      // current group key ("" until the first rekey)
 	pending string      // latest applied key not yet saved to engine.toml
 	timer   *time.Timer // fires once to save the pending key
 	cur     *meshRuntime
@@ -886,7 +827,24 @@ func (k *keyApplier) rekey(key string) {
 	if k.cur != nil {
 		k.cur.stop()
 	}
+	k.key = key
 	k.cur = startMesh(key, k.deps)
+}
+
+// Rebuild stops and rebuilds the mesh for the CURRENT key, running
+// prep under the applier's lock first — the mode applier uses it to
+// make d.mode visible to the fresh incarnation (a plain write outside
+// the lock could race a concurrent key rekey).
+func (k *keyApplier) Rebuild(prep func()) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if prep != nil {
+		prep()
+	}
+	if k.cur != nil {
+		k.cur.stop()
+	}
+	k.cur = startMesh(k.key, k.deps)
 }
 
 // stop tears the current incarnation down (engine shutdown) and
@@ -909,6 +867,67 @@ func (k *keyApplier) stop() {
 			log.Printf("group key persist failed on shutdown: %v", err)
 		}
 	}
+}
+
+// modeSaveDelay debounces the engine.toml write behind a mode switch:
+// the mesh rebuild is instant, the config write follows once the
+// clicking settles (same shape as the key applier's deferred save).
+const modeSaveDelay = 2 * time.Second
+
+// modeApplier applies the dashboard's GLOBAL mesh mode (M2 step ④
+// rework): one switch for how this engine interacts with all peers.
+// The mesh rebuilds immediately under the key applier's lock (the new
+// incarnation sees the new mode), engine.toml's mesh_mode follows
+// after a short debounce so the choice survives a restart. The mode
+// is engine-wide state — it deliberately outlives the RAM-only key
+// path and rekeys.
+type modeApplier struct {
+	cfgPath string
+	keys    *keyApplier
+	deps    *meshDeps // the keyApplier's own deps, mutated under its lock
+	srv     *api.Server
+
+	mu      sync.Mutex
+	pending string      // latest applied mode not yet saved to engine.toml
+	timer   *time.Timer // fires once to save the pending mode
+}
+
+// Apply switches the global mode: rebuild the mesh for it now, persist
+// the toml line shortly after. Called from the HTTP handler
+// (POST /api/mode) — the rebuild runs before the response goes out, so
+// the dashboard polls see the new mesh immediately.
+func (a *modeApplier) Apply(mode string) error {
+	a.keys.Rebuild(func() { a.deps.mode = mode })
+	a.srv.SetMeshMode(mode)
+	a.mu.Lock()
+	a.pending = mode
+	if a.timer != nil {
+		a.timer.Stop()
+	}
+	a.timer = time.AfterFunc(modeSaveDelay, func() { a.save(mode) })
+	a.mu.Unlock()
+	log.Printf("dashboard: mesh mode → %s (mesh rebuilt; engine.toml updated in ~%ds)",
+		mode, int(modeSaveDelay.Seconds()))
+	return nil
+}
+
+// save persists the pending mode if it is still the latest one.
+func (a *modeApplier) save(mode string) {
+	a.mu.Lock()
+	latest := a.pending
+	a.mu.Unlock()
+	if latest != mode {
+		return
+	}
+	if err := config.SaveMeshMode(a.cfgPath, latest); err != nil {
+		log.Printf("mesh mode persist failed: %v (applied live anyway — a restart will revert it)", err)
+		return
+	}
+	a.mu.Lock()
+	if a.pending == mode {
+		a.pending = ""
+	}
+	a.mu.Unlock()
 }
 
 // openBrowser opens the dashboard in the default browser (#4).

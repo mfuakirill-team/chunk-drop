@@ -9,6 +9,9 @@ bin/
 # Test binary, built with `go test -c`
 *.test
 
+# Stray build artifacts at the repo root (bin/ is the real target)
+/engine
+
 # Coverage profiles
 *.out
 coverage.*

@@ -53,21 +53,20 @@ func (s *Server) handlePickFolder(w http.ResponseWriter, r *http.Request) {
 // devices. The "hub" flag marks clients that are reachable over the
 // internet — the UI shows them with a globe; hub-only ones have no
 // LAN ip, so they are shown by the first characters of their ID.
-// With route controls wired (M2 step ④) each row also carries the
-// owner's mode ("auto"/"tunnel"/"relay"/"off") and — for internet
-// peers — the route last used ("tunnel"/"relay"; LAN peers are
-// always "lan").
+// Each row also carries the live transfer rates (M2 step ④ rework):
+// "down" = bytes/s this engine pulls FROM that client, "up" = bytes/s
+// it serves TO that client (0/absent = idle).
 func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
-	rc := s.routesSnapshot()
-	var routes, modes map[string]string
-	if rc != nil {
-		routes, modes = rc.Routes(), rc.Modes()
+	up := s.UploadRates()
+	var down map[string]float64
+	if s.DownloadRates != nil {
+		down = s.DownloadRates.Rates()
 	}
-	modeOf := func(id string) string {
-		if m, ok := modes[id]; ok {
-			return m
+	rate := func(m map[string]float64, id string) float64 {
+		if m == nil {
+			return 0
 		}
-		return "auto"
+		return m[id]
 	}
 	self := map[string]any{"id": "", "name": "", "ip": "", "port": 0, "self": true}
 	peers := []map[string]any{}
@@ -77,18 +76,22 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		self = map[string]any{
 			"id": b.ID, "name": b.Name, "ip": localIP(), "port": b.Port, "self": true,
 		}
-		for _, m := range d.Table().List() {
-			row := map[string]any{
-				"id":    m.ID,
-				"name":  m.Name,
-				"ip":    m.IP,
-				"port":  m.Port,
-				"hub":   false,
-				"route": "lan", // LAN peers always take the direct route
-				"mode":  modeOf(m.ID),
+		// Internet mode interacts via the global internet only — the
+		// Clients card then lists hub clients, not LAN neighbors.
+		if s.MeshMode() != "internet" {
+			for _, m := range d.Table().List() {
+				row := map[string]any{
+					"id":   m.ID,
+					"name": m.Name,
+					"ip":   m.IP,
+					"port": m.Port,
+					"hub":  false,
+					"down": rate(down, m.ID),
+					"up":   rate(up, m.ID),
+				}
+				idx[m.ID] = row
+				peers = append(peers, row)
 			}
-			idx[m.ID] = row
-			peers = append(peers, row)
 		}
 	}
 	for _, dev := range s.hubDevices() {
@@ -100,13 +103,13 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		peers = append(peers, map[string]any{
-			"id":    dev.ID,
-			"name":  dev.Name,
-			"ip":    "",
-			"port":  0,
-			"hub":   true,
-			"route": routes[dev.ID], // "tunnel"/"relay"; "" = not dialed yet
-			"mode":  modeOf(dev.ID),
+			"id":   dev.ID,
+			"name": dev.Name,
+			"ip":   "",
+			"port": 0,
+			"hub":  true,
+			"down": rate(down, dev.ID),
+			"up":   rate(up, dev.ID),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"self": self, "peers": peers})
@@ -135,26 +138,11 @@ func (s *Server) hubDevices() []hubclient.Peer {
 	return c.Status().Devices
 }
 
-// peerPaused reports whether the request comes from a peer the
-// dashboard paused (mode "off", step ④). The pulling peer's identity:
-// tunnel/relay conns carry `tunnel:<deviceID>` / `relay:<deviceID>`
-// RemoteAddrs; LAN conns carry an IP:port the discovery table can
-// name. Unknown identity (phones, unidentified conns) → not paused —
-// those are not mesh engines and the group key already gated them.
-func (s *Server) peerPaused(r *http.Request) bool {
-	rc := s.routesSnapshot()
-	if rc == nil {
-		return false
-	}
-	peer := requestPeerID(r, s.discoverySnapshot())
-	if peer == "" {
-		return false
-	}
-	return rc.Modes()[peer] == "off"
-}
-
 // requestPeerID identifies the engine behind a mesh request ("" when
-// unknown). See peerPaused for the transport shapes.
+// unknown). Tunnel/relay conns carry `tunnel:<deviceID>` /
+// `relay:<deviceID>` RemoteAddrs; LAN conns carry an IP:port the
+// discovery table can name. Used to attribute per-peer transfer rates
+// (the Clients card's upload column).
 func requestPeerID(r *http.Request, d PeersSource) string {
 	ra := r.RemoteAddr
 	for _, p := range []string{"tunnel:", "relay:"} {
@@ -191,20 +179,9 @@ func (s *Server) handleSyncState(w http.ResponseWriter, r *http.Request) {
 // handleSyncStart serves a file from the shared folder to a pulling
 // peer: body {"rels": ["a/b.jpg"]} → session (id+key+manifest) the
 // peer fetches chunks from via /api/chunk — same wire as receivers.
-// A peer the dashboard put "off" (M2 step ④) is refused here: pause
-// is two-sided wherever the pulling peer is identifiable (tunnel and
-// relay conns carry the device ID in RemoteAddr; LAN conns are named
-// by the discovery table). An in-flight pull that already holds a
-// session key finishes — the gate closes the next pull.
 func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 	if s.Sync == nil || s.Sessions == nil {
 		http.Error(w, `{"error":"sync unavailable"}`, http.StatusNotFound)
-		return
-	}
-	if s.peerPaused(r) {
-		// Same generic body as any other sync-start failure: the
-		// paused peer learns nothing about why.
-		http.Error(w, `{"error":"sync start failed"}`, http.StatusBadRequest)
 		return
 	}
 	var body struct {
