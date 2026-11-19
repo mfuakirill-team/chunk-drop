@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -232,22 +233,48 @@ func (c *Client) serve(ctx context.Context) error {
 	var dialErr error
 	for _, ch := range c.plan() {
 		l, err := c.dialChannel(dialCtx, ctx, ch)
-		if err != nil {
-			if dialErr == nil {
-				dialErr = err
-			} else {
-				c.logf("hub channel %s failed: %v", ch, err)
-			}
-			continue
+		if err == nil {
+			lnk, active = l, ch
+			break
 		}
-		lnk, active = l, ch
-		break
+		if dialErr == nil {
+			dialErr = err
+		} else {
+			c.logf("hub channel %s failed: %v", ch, err)
+		}
+		if !mayFallback(ch, err) {
+			break
+		}
 	}
 	cancel()
 	if lnk == nil {
 		return fmt.Errorf("dial: %w", dialErr)
 	}
 	return c.serveLink(ctx, lnk, active)
+}
+
+// mayFallback decides whether a failed channel may hand over to the
+// next one. The rule is security-first: never drop to a WEAKER
+// channel because something TLS-shaped went wrong — that is exactly
+// what an active attacker wants.
+//
+//   - tls (outer wss) → any failure may try ws-tls: the tunnel
+//     enforces the same roots and pins, so the fallback cannot
+//     weaken verification.
+//   - ws-tls → ONLY a marker rejection (ErrMarkerRejected: the hub
+//     answered on the plaintext channel — old hub or feature off,
+//     nothing TLS ever happened). A pin mismatch or any other
+//     TLS-level failure stops here and surfaces loudly: falling back
+//     to plaintext ws would hand the traffic to whoever interfered.
+//   - ws (legacy plaintext) is the last entry already.
+func mayFallback(ch string, err error) bool {
+	switch ch {
+	case ChanTLS:
+		return true
+	case ChanWSTLS:
+		return errors.Is(err, itls.ErrMarkerRejected)
+	}
+	return false
 }
 
 // plan returns the ordered channel attempts for one connection. A

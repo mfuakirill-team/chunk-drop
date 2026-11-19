@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -105,6 +106,42 @@ func dialWS(t *testing.T, url string) *websocket.Conn {
 		t.Fatal(err)
 	}
 	return ws
+}
+
+// TestClientMarkerRejected: a hub that answers the marker with a TEXT
+// error frame on the plaintext channel (feature off or an older hub)
+// yields ErrMarkerRejected — the sentinel callers may fall back on.
+// The client's ClientHello races the rejection (the hub may answer
+// before or after it); both orders must end in the same sentinel.
+func TestClientMarkerRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		typ, data, err := ws.Read(r.Context())
+		if err != nil || !IsMarker(typ, data) {
+			return
+		}
+		// Reject exactly like the hub does: text error frame, close.
+		wctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		_ = ws.Write(wctx, websocket.MessageText,
+			[]byte(`{"type":"error","error":"inner TLS disabled on this hub"}`))
+		cancel()
+		_ = ws.CloseNow()
+	}))
+	defer srv.Close()
+
+	ws := dialWS(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/hub/ws")
+	defer ws.CloseNow()
+	_, err := Client(context.Background(), ws, &tls.Config{ServerName: "127.0.0.1"})
+	if !errors.Is(err, ErrMarkerRejected) {
+		t.Fatalf("err = %v, want ErrMarkerRejected", err)
+	}
+	if !strings.Contains(err.Error(), "inner TLS disabled") {
+		t.Fatalf("error should carry the hub's message: %v", err)
+	}
 }
 
 // TestHandshakeAndNDJSON: marker → inner TLS handshake → NDJSON

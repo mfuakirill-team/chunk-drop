@@ -176,6 +176,43 @@ func TestForcedChannel(t *testing.T) {
 	c2.Stop()
 }
 
+// TestWrongPinDoesNotFallBackToPlaintext: a TLS-level failure (pin
+// mismatch inside the tunnel) must NOT drop the client to the legacy
+// plaintext ws channel — that would hand the traffic to whoever
+// interfered with the TLS handshake. Only a marker rejection
+// (ErrMarkerRejected — nothing TLS happened) may fall back.
+func TestWrongPinDoesNotFallBackToPlaintext(t *testing.T) {
+	wsURL, _, pool := innerTLSHub(t)
+	otherPair, _ := testCertPair(t) // an unrelated key → wrong pin
+
+	id := testIdentity(t, "engine-pinfall")
+	c := New(wsURL, "group-pinfall", id, t.Logf)
+	c.TLSRoots = pool
+	c.Pins = []string{certPin(t, otherPair)}
+	// Channel stays auto: [ws-tls, ws] — the plaintext channel is
+	// right there in the plan, and must stay unreachable.
+	c.Start()
+	defer c.Stop()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if st := c.Status(); strings.Contains(st.LastError, "pin mismatch") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	st := c.Status()
+	if !strings.Contains(st.LastError, "pin mismatch") {
+		t.Fatalf("LastError = %q, want a pin mismatch", st.LastError)
+	}
+	if c.Connected() {
+		t.Fatal("client connected despite a wrong pin")
+	}
+	if st.Channel == ChanWS {
+		t.Fatalf("fell back to the plaintext channel after a pin mismatch: %+v", st)
+	}
+}
+
 // TestPlanUnit: the plan orders by forced channel, URL scheme, and
 // the RAM lastGood.
 func TestPlanUnit(t *testing.T) {

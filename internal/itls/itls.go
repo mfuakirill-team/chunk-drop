@@ -28,6 +28,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -40,6 +42,15 @@ import (
 // Marker is the first websocket message a client sends to switch the
 // connection into inner-TLS mode. Binary frame, exact bytes.
 const Marker = "chunkdrop-itls1"
+
+// ErrMarkerRejected means the hub answered the marker on the PLAIN
+// websocket — the itls channel is unavailable (disabled, or an older
+// hub). This is the only ws-tls failure from which falling back to a
+// legacy plaintext channel is safe: it happened before any TLS
+// traffic, so nothing was tampered with. A TLS-level failure (pin
+// mismatch, handshake tampering) is NOT this error — callers must
+// never fall back to plaintext then.
+var ErrMarkerRejected = errors.New("itls: hub rejected the inner-TLS marker")
 
 // HandshakeTimeout bounds the inner TLS handshake (both sides). The
 // transport's deadlines are no-ops (see Transport), so the timeout is
@@ -85,17 +96,26 @@ func IsMarker(typ websocket.MessageType, data []byte) bool {
 //     dial/serve context on the client): cancelling it unblocks both
 //     directions.
 type Transport struct {
-	ws  *websocket.Conn
-	ctx context.Context
-	wmu sync.Mutex
-	pr  *io.PipeReader
-	pw  *io.PipeWriter
+	ws    *websocket.Conn
+	ctx   context.Context
+	wmu   sync.Mutex
+	pr    *io.PipeReader
+	pw    *io.PipeWriter
+	first chan firstMsg // the pump's one-shot report of the first message
+}
+
+// firstMsg is the pump's report of the first message after the marker
+// (or of the read error, if the connection died before one arrived).
+type firstMsg struct {
+	typ  websocket.MessageType
+	data []byte
+	err  error
 }
 
 // NewTransport wraps ws. The marker frame (if any) must already be
 // consumed by the caller.
 func NewTransport(ctx context.Context, ws *websocket.Conn) *Transport {
-	t := &Transport{ws: ws, ctx: ctx}
+	t := &Transport{ws: ws, ctx: ctx, first: make(chan firstMsg, 1)}
 	t.pr, t.pw = io.Pipe()
 	go t.pump()
 	// Un-block the pump if ctx dies while it is stuck in a Pipe write
@@ -109,11 +129,24 @@ func NewTransport(ctx context.Context, ws *websocket.Conn) *Transport {
 }
 
 func (t *Transport) pump() {
+	reported := false
 	for {
 		typ, data, err := t.ws.Read(t.ctx)
 		if err != nil {
+			if !reported {
+				t.first <- firstMsg{err: err}
+				reported = true
+			}
 			t.pw.CloseWithError(err)
 			return
+		}
+		if !reported {
+			// The FIRST message decides the client channel's fate
+			// (text = the hub answered the marker on the plaintext
+			// channel → rejection). Reported before the pipe write:
+			// the watcher must not wait for a TLS-side reader.
+			t.first <- firstMsg{typ: typ, data: data}
+			reported = true
 		}
 		if typ != websocket.MessageBinary {
 			continue
@@ -179,16 +212,80 @@ func Server(tr *Transport, cfg *tls.Config) (*tls.Conn, error) {
 // short dial-deadline context, which is usually cancelled the moment
 // the connection is up). cfg must carry ServerName and the trust
 // material (roots and/or hub_cert_pin via VerifyPeerCertificate).
+//
+// TLS semantics: the client speaks FIRST (ClientHello), so the
+// handshake starts immediately after the marker; the peer's first
+// message is watched concurrently — a TEXT message means the hub
+// answered the marker on the plaintext channel (feature off or an
+// older hub): the handshake is aborted and the error wraps
+// ErrMarkerRejected, the ONLY client failure a caller may fall back
+// to legacy channels on (nothing TLS-shaped happened before it). Any
+// other failure (pin mismatch, tampering, timeout) is NOT.
 func Client(ctx context.Context, ws *websocket.Conn, cfg *tls.Config) (*tls.Conn, error) {
 	if err := SendMarker(ctx, ws); err != nil {
 		return nil, fmt.Errorf("itls: marker: %w", err)
 	}
 	tr := NewTransport(ctx, ws)
 	c := tls.Client(tr, cfg)
-	if err := handshake(c, ctx); err != nil {
+
+	hsCtx, cancel := context.WithTimeout(ctx, HandshakeTimeout)
+	defer cancel()
+	hsDone := make(chan error, 1)
+	go func() { hsDone <- c.HandshakeContext(hsCtx) }()
+
+	// Watch the peer's first message while the handshake runs. The
+	// pump reports it BEFORE piping, so a rejection is seen even
+	// though no TLS reader ever consumes bytes.
+	var m firstMsg
+	select {
+	case m = <-tr.first:
+	case err := <-hsDone:
+		// Handshake ended without any peer message (bad config,
+		// instant close). Its result is the answer.
+		if err != nil {
+			return nil, fmt.Errorf("itls: handshake: %w", err)
+		}
+		return c, nil
+	case <-hsCtx.Done():
+		_ = c.Close() // unblocks the handshake goroutine
+		<-hsDone
+		return nil, fmt.Errorf("itls: handshake timed out after %s", HandshakeTimeout)
+	}
+
+	if m.err != nil {
+		// The connection died before the peer said anything; the
+		// handshake goroutine unblocks on the closed pipe on its own
+		// (hsDone is buffered — no leak).
+		return nil, fmt.Errorf("itls: after marker: %w", m.err)
+	}
+	if m.typ != websocket.MessageBinary {
+		// The hub answered on the PLAIN websocket: it does not speak
+		// inner TLS. Surface its error frame (if parseable).
+		_ = c.Close()
+		return nil, fmt.Errorf("%w: %s", ErrMarkerRejected, peerError(m.data))
+	}
+	// Binary = the ServerHello (already piped to the TLS reader).
+	if err := <-hsDone; err != nil {
 		return nil, fmt.Errorf("itls: handshake: %w", err)
 	}
 	return c, nil
+}
+
+// peerError extracts a readable message from the hub's rejection
+// frame ({"type":"error","error":...}) or falls back to a truncated
+// raw view.
+func peerError(data []byte) string {
+	var frame struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &frame); err == nil && frame.Error != "" {
+		return frame.Error
+	}
+	s := string(data)
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return s
 }
 
 // handshake runs the TLS handshake with a watchdog: the transport's
