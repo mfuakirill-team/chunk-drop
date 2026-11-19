@@ -484,6 +484,12 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 	// reconnects forever on its own with backoff.
 	if d.mode != "local" && d.cfg.HubURL != "" && config.UsableKey(key) && d.ident != nil {
 		m.hub = hubclient.New(d.cfg.HubURL, key, d.ident, logx.Adapter(logx.LevelInfo, "hub"))
+		// Certificate pinning (M3 step A): config pins win, the
+		// build-time DefaultPin (make engine HUBPIN=...) applies when
+		// unset. A bad pin fails the dial loudly — never silently.
+		if pins := hubclient.SplitPins(d.cfg.HubCertPin); len(pins) > 0 {
+			m.hub.Pins = pins
+		}
 		// m.tunnelMgr is the M2 step ② WebRTC tunnel: DataChannels
 		// carrying the mesh HTTP protocol to hub peers. CHUNKDROP_
 		// RELAY_ONLY=1 skips it — diagnosis: force the step ③ relay

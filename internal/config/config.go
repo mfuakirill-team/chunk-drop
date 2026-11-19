@@ -92,6 +92,16 @@ type Config struct {
 	// Persisted (the dashboard's mode switch writes it) so the choice
 	// survives a restart. Empty/unknown → auto.
 	MeshMode string `toml:"mesh_mode"`
+
+	// HubCertPin is an optional SPKI pin for the hub's TLS certificate:
+	// comma-separated list of "sha256/<base64>" fingerprints of the
+	// certificate's public key (`make pin` prints the current value).
+	// Non-empty → the hub's presented certificate must match one entry
+	// IN ADDITION to normal chain verification — a MITM whose root CA
+	// is installed in the trust store still fails. Empty (default) =
+	// standard verification only. Empty here but a pin baked into the
+	// binary at build time (hubclient.DefaultPin) → the baked pin wins.
+	HubCertPin string `toml:"hub_cert_pin"`
 }
 
 // Mesh mode vocabulary (MeshMode above; validated at load and at the

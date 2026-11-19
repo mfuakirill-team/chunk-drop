@@ -14,10 +14,14 @@ package hubclient
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +78,15 @@ type Client struct {
 	OnRelay func(from string, f hub.Relay)
 	// Logf renders a line; nil = silent (the caller wires logx).
 	Logf func(format string, args ...any)
+
+	// Pins is the hub certificate SPKI pin list ("sha256/<base64>"
+	// entries, docs in pin.go). Empty = fall back to the build-time
+	// DefaultPin; both empty = standard TLS verification only. Enforced
+	// on wss dials in addition to chain verification.
+	Pins []string
+	// TLSRoots replaces the system root store for hub TLS verification
+	// when set (test hook; production dials use the system pool).
+	TLSRoots *x509.CertPool
 
 	mu        sync.Mutex
 	conn      *websocket.Conn
@@ -187,9 +200,7 @@ func (c *Client) loop(ctx context.Context) {
 // serve runs one connection attempt to completion.
 func (c *Client) serve(ctx context.Context) error {
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	ws, _, err := websocket.Dial(dialCtx, c.URL, &websocket.DialOptions{
-		HTTPHeader: nil, // nothing sensitive travels in headers
-	})
+	ws, err := c.dial(dialCtx)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -249,6 +260,63 @@ func (c *Client) serve(ctx context.Context) error {
 			c.handleFrame(data)
 		}
 	}
+}
+
+// dial opens the websocket. On wss endpoints it applies certificate
+// pins (hub_cert_pin / build-time DefaultPin) in addition to the
+// standard chain verification, and honors TLSRoots instead of the
+// system pool when set (test hook). Plain ws:// dials (local smoke,
+// later the M3 inner-TLS channel) carry no outer TLS — pins cannot
+// apply there, so a pin configured against a ws:// URL is logged and
+// ignored rather than silently verified-against-nothing.
+func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
+	opts := &websocket.DialOptions{
+		HTTPHeader: nil, // nothing sensitive travels in headers
+	}
+	if !strings.HasPrefix(strings.ToLower(c.URL), "wss://") {
+		if pins, _ := c.activePins(); len(pins) > 0 {
+			c.logf("hub_cert_pin set but hub_url is not wss — pin ignored on %s", c.URL)
+		}
+		ws, _, err := websocket.Dial(ctx, c.URL, opts)
+		return ws, err
+	}
+
+	pins, err := c.activePins()
+	if err != nil {
+		return nil, err
+	}
+	if len(pins) > 0 || c.TLSRoots != nil {
+		// Clone the default transport so the proxy behavior of
+		// http.DefaultTransport (ProxyFromEnvironment) survives: a
+		// pinned dial must still work through HTTPS_PROXY/NO_PROXY.
+		tr := cloneDefaultTransport()
+		tc := tr.TLSClientConfig
+		if tc == nil {
+			tc = &tls.Config{}
+		} else {
+			tc = tc.Clone()
+		}
+		tc.MinVersion = tls.VersionTLS12
+		if c.TLSRoots != nil {
+			tc.RootCAs = c.TLSRoots
+		}
+		if len(pins) > 0 {
+			tc.VerifyPeerCertificate = pinVerifier(pins)
+		}
+		tr.TLSClientConfig = tc
+		opts.HTTPClient = &http.Client{Transport: tr}
+	}
+	ws, _, err := websocket.Dial(ctx, c.URL, opts)
+	return ws, err
+}
+
+// cloneDefaultTransport copies http.DefaultTransport when it is the
+// usual *http.Transport (it always is, but do not assume).
+func cloneDefaultTransport() *http.Transport {
+	if def, ok := http.DefaultTransport.(*http.Transport); ok {
+		return def.Clone()
+	}
+	return &http.Transport{}
 }
 
 // hello sends the authenticated first frame. The signature binds

@@ -10,9 +10,16 @@ NODE ?= npm
 # container owned by another uid — CI does exactly that. Nothing reads
 # the VCS stamp (the version string is set in code), so it's off.
 LDFLAGS := -s -w
+# HUBPIN=<sha256/...> bakes the hub certificate pin into every binary
+# built in this invocation (internal/hubclient.DefaultPin). Get the
+# value with `make pin HOST=drop.404.mn`. Config hub_cert_pin wins
+# when set.
+ifneq ($(strip $(HUBPIN)),)
+LDFLAGS += -X chunkdrop/internal/hubclient.DefaultPin=$(HUBPIN)
+endif
 BUILDFLAGS := -trimpath -buildvcs=false -ldflags="$(LDFLAGS)"
 
-.PHONY: all web engine hub engine-win engine-linux engine-mac test clean help
+.PHONY: all web engine hub engine-win engine-linux engine-mac test clean pin help
 
 all: engine hub
 
@@ -50,6 +57,16 @@ engine-mac: web
 ## test: unit tests (transfer rules, session, api, lanip)
 test:
 	$(GO) test ./...
+
+## pin: fetch the hub certificate's SPKI pin (HOST=drop.404.mn).
+## Prints "sha256/<base64>" — put that in engine.toml (hub_cert_pin)
+## or pass HUBPIN=<that> to make engine.
+pin:
+	@echo "pin for $(HOST) (leaf certificate public key):"
+	@echo "sha256/$$(openssl s_client -servername $(HOST) -connect $(HOST):443 </dev/null 2>/dev/null \
+		| openssl x509 -pubkey -noout \
+		| openssl pkey -pubin -outform DER \
+		| openssl dgst -sha256 -binary | base64)"
 
 ## clean: build artifacts
 clean:
