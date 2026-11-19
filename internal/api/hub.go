@@ -20,6 +20,11 @@ func (s *Server) handleHub(w http.ResponseWriter, r *http.Request) {
 		"enabled":   true,
 		"url":       st.URL,
 		"connected": st.Connected,
+		// Which channel the hub connection rides (M3): "tls" = plain
+		// wss, "ws-tls" = real TLS inside a plaintext ws:// tunnel
+		// (MITM networks), "ws" = legacy plaintext. Empty when no
+		// connection was ever established.
+		"channel":   st.Channel,
 		"lastError": st.LastError,
 		"devices":   st.Devices,
 		// Step ③ diagnosis knob, surfaced so the hub card can say

@@ -33,6 +33,10 @@ const (
 	// MeshModeAuto is the default mesh mode: LAN and internet both on.
 	MeshModeAuto = "auto"
 
+	// HubChannelAuto is the default hub channel: wss first, inner-TLS
+	// over ws:// on failure.
+	HubChannelAuto = "auto"
+
 	// DefaultHubURL / DefaultStunURL preconfigure the internet mesh in
 	// fresh installs and first-run templates: the user runs the engine
 	// and the hub is already wired up. An engine.toml that *explicitly*
@@ -102,7 +106,36 @@ type Config struct {
 	// standard verification only. Empty here but a pin baked into the
 	// binary at build time (hubclient.DefaultPin) → the baked pin wins.
 	HubCertPin string `toml:"hub_cert_pin"`
+
+	// HubChannel selects the hub connection channel (M3):
+	//
+	//   - "auto"    — default: plain wss first; on dial/verification
+	//     failure (e.g. a MITM network aborting the TLS handshake),
+	//     fall back to the inner-TLS channel (real TLS inside a
+	//     plaintext ws:// connection). Whichever channel last worked
+	//     is tried first until it stops working.
+	//   - "tls"     — force plain wss only (never ws://).
+	//   - "ws-tls"  — force the inner-TLS channel only.
+	//
+	// Unknown/empty → auto.
+	HubChannel string `toml:"hub_channel"`
+
+	// HubWSURL overrides the ws:// endpoint used by the inner-TLS
+	// channel. Empty = derive it from hub_url: same host and path,
+	// ws:// scheme, port 443 dropped (80 implied). Only useful when
+	// the ws endpoint lives on a nonstandard port or path.
+	HubWSURL string `toml:"hub_ws_url"`
 }
+
+// Hub channel vocabulary (HubChannel above; validated at load).
+var HubChannels = map[string]bool{
+	"auto":   true,
+	"tls":    true,
+	"ws-tls": true,
+}
+
+// ValidHubChannel reports whether s is an accepted hub_channel value.
+func ValidHubChannel(s string) bool { return HubChannels[s] }
 
 // Mesh mode vocabulary (MeshMode above; validated at load and at the
 // /api/mode endpoint).
@@ -125,6 +158,7 @@ func Default() Config {
 		HubURL:         DefaultHubURL,
 		StunURL:        DefaultStunURL,
 		MeshMode:       MeshModeAuto,
+		HubChannel:     HubChannelAuto,
 	}
 }
 
@@ -173,6 +207,10 @@ func Load() (Config, string, error) {
 	// Mesh mode: empty (old config files) or a typo → auto.
 	if !ValidMeshMode(cfg.MeshMode) {
 		cfg.MeshMode = MeshModeAuto
+	}
+	// Hub channel: empty (old config files) or a typo → auto.
+	if !ValidHubChannel(cfg.HubChannel) {
+		cfg.HubChannel = HubChannelAuto
 	}
 	// Env fallback (Docker): a key in the environment beats "no key yet".
 	if cfg.GroupKey == "" || strings.Contains(cfg.GroupKey, "<paste") {

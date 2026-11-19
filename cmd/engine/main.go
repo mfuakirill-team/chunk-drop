@@ -490,6 +490,13 @@ func startMesh(key string, d meshDeps) *meshRuntime {
 		if pins := hubclient.SplitPins(d.cfg.HubCertPin); len(pins) > 0 {
 			m.hub.Pins = pins
 		}
+		// Hub channel policy (M3 step C): auto (default) = wss first,
+		// inner-TLS fallback on dial/verify failure; forced values skip
+		// the other channel entirely.
+		if config.ValidHubChannel(d.cfg.HubChannel) {
+			m.hub.Channel = d.cfg.HubChannel
+		}
+		m.hub.WSURL = d.cfg.HubWSURL
 		// m.tunnelMgr is the M2 step ② WebRTC tunnel: DataChannels
 		// carrying the mesh HTTP protocol to hub peers. CHUNKDROP_
 		// RELAY_ONLY=1 skips it — diagnosis: force the step ③ relay
