@@ -326,6 +326,53 @@ expire after 24 h. Device identity is a per-device Ed25519 key at
 `~/.config/chunkdrop/device.key` (0600); the ID is
 hex(SHA-256(public key)).
 
+### Hub channels (M3 — TLS when the network intercepts TLS)
+
+Some networks (corporate/hotel/campus proxies) terminate the outer
+`:443` TLS handshake with their own certificate: the standard wss
+channel dies with `x509: certificate signed by unknown authority` (or,
+worse, "succeeds" against a proxy whose root CA is already in the
+system trust store — a silent MITM). The M3 channels deal with that by
+carrying a **real TLS handshake inside a plaintext websocket**:
+
+```
+client                     nginx :80              hub
+  │ ws://…/hub/ws  (ordinary upgrade, no TLS outside)  │
+  │── binary message "chunkdrop-itls1" (marker) ──────►│ ITLS on?
+  │── binary messages = raw TLS records (≤16 KiB) ────►│ tls.Server
+  │◄══ inner TLS handshake: REAL hub certificate ═════►│
+  │   verified: system roots + hub_cert_pin            │
+  │   then: the same JSON frames as NDJSON (line-based)│
+```
+
+- The marker (`itls1`) must be the **first** message. A hub without
+  `--inner-tls-cert/--inner-tls-key` rejects it (`error` frame, then
+  close) — legacy clients and behavior are untouched.
+- One TLS record per binary message; after the handshake the hub
+  protocol continues **NDJSON over the inner TLS connection** (one
+  JSON frame per `\n`-terminated line, same schema as above). The
+  outer websocket's ping/pong stays the keepalive on both sides.
+- Verification is identical to any TLS connection — **chain against
+  the system roots, plus `hub_cert_pin` (SPKI pin) when set**. The
+  genuine certificate is presented live by the real hub *inside* the
+  tunnel; nothing cert-shaped is ever baked into the binary (the pin
+  is a public fingerprint, `make pin` prints it).
+- Threat-model honesty: this is **obfuscation, not invisibility** — a
+  middlebox that scans payloads can fingerprint the inner ClientHello.
+  What it defeats is handshake interception, not traffic analysis.
+
+Channel selection (`hub_channel`, M3):
+
+| `hub_channel` | Behavior |
+|---|---|
+| `auto` *(default)* | wss first; on **dial/verification failure only**, fall back to ws-tls (ws:// URLs, e.g. local tests, go ws-tls → plain `ws` legacy). Whichever channel last connected is tried first (RAM, not persisted). |
+| `tls` | Classic wss only. |
+| `ws-tls` | Inner-TLS channel only. |
+
+`/api/hub` reports the active channel in `channel`: `"tls"` (plain
+wss), `"ws-tls"` (inner TLS), `"ws"` (legacy plaintext, local tests),
+or empty until the first connection.
+
 ### Transfer path (implemented, step ②)
 
 Once signaling completes, each direction gets its own PeerConnection

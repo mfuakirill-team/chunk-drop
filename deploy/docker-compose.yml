@@ -7,6 +7,10 @@
 #
 #   hub  :8080 → published on localhost only; nginx (TLS) is the front
 #          door: deploy/nginx-site.conf.example on the host.
+#          M3: the hub also serves the inner-TLS channel (--inner-tls-
+#          cert/--inner-tls-key, cert mounted below) so engines on
+#          TLS-intercepting networks can run real TLS inside a
+#          plaintext ws:// connection (DEPLOY-VPS.md §7).
 #   stun : coturn in STUN-only mode (no TURN credentials, no relay) —
 #          server-reflexive candidates for WebRTC NAT traversal
 #          (engine.toml: stun_url). Host network so coturn sees the
@@ -23,13 +27,25 @@ services:
     image: chunkdrop-hub
     container_name: chunkdrop-hub
     restart: unless-stopped
+    command:
+      # M3 inner-TLS channel: real TLS inside plaintext ws:// for
+      # MITM'd networks. This is a COPY of the pair nginx serves on
+      # :443 (see DEPLOY-VPS.md §7 for the install lines + certbot
+      # deploy hook — the distroless hub runs as nonroot and cannot
+      # read certbot's 0600 archive files directly). Delete this
+      # command block (and the mount) to run the M2-style plain-ws hub.
+      - --inner-tls-cert=/certs/fullchain.pem
+      - --inner-tls-key=/certs/privkey.pem
     ports:
       - "127.0.0.1:8085:8080" # localhost only — nginx is the front door
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    # NOTE: no volumes, no environment — the hub is stateless by
-    # design (PLAN.md D5) and authenticates clients itself.
+    volumes:
+      - /etc/chunkdrop/certs:/certs:ro
+    # NOTE: no environment — the hub is stateless by design (PLAN.md
+    # D5) and authenticates clients itself. Cert renewal = the certbot
+    # deploy hook re-copies the pair and restarts the container.
 
   stun:
     image: coturn/coturn:4-alpine

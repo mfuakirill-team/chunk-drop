@@ -68,7 +68,7 @@ docker compose ps
 
 # 3. verify
 curl -s http://127.0.0.1:8085/healthz        # → ok
-docker compose logs hub | head               # → hub 0.1.0-m2.2 listening on :8080
+docker compose logs hub | head               # → hub 0.1.0-m2.3 listening on :8080
 docker compose logs stun | head              # coturn banner + "Listening on port 3478" —
                                              # NOT "Operation not permitted" (exit 126 =
                                              # the image's file-capped binary vs cap rules;
@@ -118,6 +118,70 @@ their next keepalive cycle and re-announce themselves. Rollback =
 - RAM: tens of MB idle; relayed transfers (step ③) add only buffer
   memory (the hub holds no stream state), capped at 80 Mbit/s of
   relay throughput.
+
+## 7. Inner-TLS channel (M3) — for TLS-intercepting client networks
+
+Some client networks (corporate/hotel proxies) terminate the outer
+`:443` TLS handshake with their own certificate: engines there fail
+with `x509: certificate signed by unknown authority`, or worse,
+"succeed" against a proxy CA their OS trusts (a silent MITM). The M3
+inner-TLS channel gives them **real TLS inside a plaintext `ws://`
+connection** (docs/PROTOCOL.md §5): the cert is presented live by the
+hub *inside* the tunnel and verified against the system roots +
+`hub_cert_pin` — nothing cert-shaped is baked into engine binaries.
+
+Steps (this is the one part that cannot be tested from a dev box —
+it needs the VPS):
+
+```bash
+# 0. Host-side cert copy the nonroot distroless hub can read
+#    (certbot's archive files are 0600 root — mounting them directly
+#    would be unreadable AND stale after the first renewal).
+install -d -m 0755 /etc/chunkdrop/certs
+install -m 0644 /etc/letsencrypt/live/drop.404.mn/fullchain.pem /etc/chunkdrop/certs/
+install -m 0640 -o 65532 -g 65532 /etc/letsencrypt/live/drop.404.mn/privkey.pem /etc/chunkdrop/certs/
+
+# 1. Port 80: forward ONLY /hub/ws as a plain websocket (the example
+#    site config already has the location block — deploy/nginx-site.conf.example
+#    §"M3 inner-TLS channel"). Then:
+nginx -t && systemctl reload nginx
+
+# 2. Recreate the stack with the new compose (cert mount + hub flags)
+cd ~/chunkdrop && git pull && cd deploy && docker compose up -d --build
+docker compose logs hub | head
+#    → "inner-TLS channel on: itls1 over ws:// terminates with /certs/fullchain.pem"
+
+# 3. Renewals: never hand-copied certs go stale silently — add a
+#    certbot deploy hook (certbot runs as root, so it may read the
+#    privkey):
+cat >/etc/letsencrypt/renewal-hooks/deploy/chunkdrop-certs.sh <<'EOF'
+#!/bin/sh
+install -m 0644 /etc/letsencrypt/live/drop.404.mn/fullchain.pem /etc/chunkdrop/certs/
+install -m 0640 -o 65532 -g 65532 /etc/letsencrypt/live/drop.404.mn/privkey.pem /etc/chunkdrop/certs/
+cd /root/chunkdrop/deploy && docker compose restart hub
+EOF
+chmod +x /etc/letsencrypt/renewal-hooks/deploy/chunkdrop-certs.sh
+```
+
+Smoke tests (from a normal network — the classic wss channel must keep
+working; then from an MITM'd network if you have one):
+
+```bash
+curl -s https://drop.404.mn/healthz          # → ok  (443 unchanged)
+# wss still connects: engine starts, GET /api/hub → "channel": "tls"
+# inner-TLS endpoint answers (marker handling lives in the ws layer):
+npx wscat -c ws://drop.404.mn/hub/ws
+#   send text "hi"  → {"type":"error","error":"first message must be hello"}  (legacy path intact)
+#   the binary marker "chunkdrop-itls1" on an itls-enabled hub starts
+#   a TLS server handshake — wscat prints a binary frame (the server hello)
+# from an engine on the intercepting network:
+#   GET /api/hub → "channel": "ws-tls" and connected: true
+```
+
+Optional hardening, per engine (`engine.toml`): `hub_cert_pin` with
+`make pin HOST=drop.404.mn` output (comma-separated old+new across a
+key rotation). With the pin set, even a proxy whose root CA the OS
+trusts cannot silently read the hub connection.
 - CPU: negligible — all crypto lives in the clients by design.
 - Disk: the image itself; **zero user data, ever**.
 - Bandwidth: STUN binding requests are tiny; P2P WebRTC transfers cost

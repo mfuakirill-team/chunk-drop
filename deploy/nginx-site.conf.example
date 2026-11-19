@@ -43,5 +43,25 @@ server {
 server {
     listen 80;
     server_name drop.404.mn;
-    return 301 https://$host$request_uri;
+
+    # M3 inner-TLS channel: engines on TLS-intercepting networks dial
+    # ws://…/hub/ws on port 80 and run a REAL TLS handshake inside the
+    # websocket frames. Forward this one path as a plain websocket;
+    # everything else on :80 redirects to https.
+    location = /hub/ws {
+        proxy_pass http://127.0.0.1:8085;
+
+        # The same three traps as above — plain ws frames this time.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
 }

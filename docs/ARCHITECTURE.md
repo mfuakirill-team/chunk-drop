@@ -49,6 +49,14 @@ A stateless coordination service. Responsibilities:
   bounding RAM at every hop.
 - **Never writes user files to disk.** No volume mounts, read-only root
   filesystem. A `/healthz` endpoint for monitoring.
+- **Inner-TLS channel (M3, optional)**: with
+  `--inner-tls-cert/--inner-tls-key` (the same pair nginx uses), a
+  client that opens a plaintext `ws://` connection and sends the
+  `chunkdrop-itls1` marker gets its connection wrapped in TLS server-
+  side and continues the identical protocol as NDJSON inside — the
+  real certificate reaches clients on MITM networks through the
+  tunnel. Without the flags the feature is off and plain-ws behavior
+  is untouched.
 
 Everything else — TLS, compression, firewall-facing 443 — is handled by the
 nginx already running on the VPS host (`DEPLOY-VPS.md`).
@@ -138,6 +146,37 @@ rekey); the choice persists. The Clients card shows who is connected
 with live per-client rates: ▼ what this engine pulls from each client,
 ▲ what it serves to each (rolling 5 s meters on the puller's verified
 chunk writes and the chunk handler's served bytes).
+
+### Inner-TLS hub channel (M3) — connecting through TLS-intercepting networks
+
+Some networks terminate the outer `:443` TLS handshake with their own
+certificate, killing (or silently faking) the wss channel above. The
+M3 answer: carry a **real TLS handshake inside a plaintext
+websocket** — the censor sees ordinary ws frames on port 80, the
+engine sees the genuine hub certificate, verified against the system
+roots and `hub_cert_pin`:
+
+```
+Engine ── ws://drop.404.mn:80/hub/ws (no TLS outside) ──► nginx :80 ──► hub
+   │── "chunkdrop-itls1" marker, then raw TLS records as ws frames ──►│
+   │◄══ TLS handshake with the REAL certificate (live, from the hub) ►│
+   │◄══ NDJSON hub protocol inside the TLS tunnel ═══════════════════►│
+```
+
+Key properties (docs/PROTOCOL.md §5 "Hub channels", internal/itls):
+
+- The certificate is never embedded in the binary — the client bakes
+  only the **pin** (a public SPKI fingerprint); the cert is presented
+  live by the real hub inside the tunnel and verified like any TLS
+  connection. TLS keys are negotiated end-to-end, over the middlebox's
+  head.
+- Legacy compatibility: the marker is opt-in per connection; a hub
+  without `--inner-tls-cert` keeps serving plain ws exactly as before.
+- Threat-model honesty: **obfuscation, not invisibility.** A
+  payload-scanning middlebox can fingerprint the inner ClientHello;
+  anti-fingerprinting (padding/scheduling) is future work. Pinning's
+  specific job is converting a *silent* MITM (proxy CA trusted by the
+  OS) into the same loud failure as an untrusted one.
 
 ### USB sneakernet (M4)
 

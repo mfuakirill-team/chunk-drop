@@ -118,6 +118,9 @@ Edit `engine.toml`; restart the engine after changes.
 | `hub_url` | `wss://drop.404.mn/hub/ws` (fresh installs) | Hub websocket endpoint. Empty (explicitly set in an older config) = internet mesh off: LAN-only, M0/M1 behavior. |
 | `stun_url` | `stun:drop.404.mn:3478` (fresh installs) | STUN server for WebRTC NAT traversal. Empty is fine on a plain LAN. |
 | `mesh_mode` | `auto` | Global mesh mode (§4.2.1): `auto` (LAN + internet), `local` (LAN only, hub off) or `internet` (hub only). The dashboard's Mesh mode card writes this; hand-editing works too. |
+| `hub_channel` | `auto` | Hub connection channel (M3): `auto` = plain `wss` first, and on dial/verification failure fall back to **inner TLS over `ws://`** (for networks whose proxy intercepts the outer TLS handshake); `tls` = wss only; `ws-tls` = inner-TLS only. `GET /api/hub` shows the channel in use. |
+| `hub_cert_pin` | *(empty)* | Optional SPKI pin of the hub's TLS certificate, `sha256/<base64>` (comma-separated list allowed for key rotation; `make pin HOST=drop.404.mn` prints the current value). Enforced **in addition to** normal chain verification: a proxy whose root CA is trusted by your OS can no longer silently read hub traffic — the connection aborts loudly instead. On MITM networks this pins the inner-TLS channel to the genuine hub key. |
+| `hub_ws_url` | *(derived)* | Override for the `ws://` endpoint the inner-TLS channel dials. Empty = derived from `hub_url` (same host and path, `ws://`, port 443 dropped). Only needed when the port-80 endpoint lives on a nonstandard port/path. |
 | `allow_remote_dashboard` | `false` | Dashboard/control access from **other devices**. Off: the dashboard works only on the engine machine itself (loopback or its own LAN address); other devices get a 404 even with the group key. Turn on only for headless engines (e.g. a NAS whose dashboard you open from a laptop). Receiving links always work from other devices regardless. |
 | `receive_dir` | *(M1)* | Where received uploads land (upload direction ships in M1). |
 | `max_upload_bytes` | `106253862144` | Per-transfer upload cap (M1). Ignore for now. |
@@ -568,6 +571,40 @@ configure.
 | Want to test whether the relay path works | Run the engine with `CHUNKDROP_RELAY_ONLY=1` — it skips the tunnel entirely; if sync works then, the hub path is fine and the NAT/tunnel is the problem. |
 | Peer visible but not syncing at all | Check the Clients card's **mode** column: `⏸ off` pauses sync with that peer in both directions. Set it back to `auto`. Toggles reset on restart. |
 | Relay transfers are slow | Expected: everything goes through the VPS (~80 Mbit/s ceiling at a 50 ms RTT, shared with signaling). It is a fallback, not the default route. |
+
+### 5.13 `x509: certificate signed by unknown authority` on the hub connection
+
+The engine's log shows repeated `hub connection lost: … x509: …`. This
+means **your network is intercepting TLS** (a corporate/hotel/campus
+proxy terminating `:443` with its own certificate). The engine refuses
+it — correctly: that proxy could read everything to and from the hub.
+
+Options, in order of preference:
+
+1. **Nothing to do (M3 default).** If the hub runs with the inner-TLS
+   channel enabled (VPS side, see `docs/DEPLOY-VPS.md`), `hub_channel`
+   = `auto` (the default) already falls back to **real TLS inside a
+   plaintext `ws://` connection** — the proxy's fake handshake never
+   happens and the genuine hub certificate is verified inside the
+   tunnel. `GET /api/hub` shows `"channel": "ws-tls"` when it is in
+   use. If the port-80 `ws://` endpoint is blocked too, both channels
+   fail — that is an outage, loudly reported, never a silent reading
+   proxy.
+2. **A SOCKS/HTTPS proxy you control.** The engine honors
+   `HTTPS_PROXY`/`NO_PROXY` for the hub connection (Go stdlib proxy
+   rules):
+   `HTTPS_PROXY=socks5://127.0.0.1:9050 NO_PROXY=localhost,127.0.0.1,192.168.0.0/16 ./engine`.
+   Note: static Go binaries ignore `proxychains`-style injection
+   (no dynamic linker hooks) — environment variables are the way.
+3. **Pin the hub certificate** (`hub_cert_pin`, or the pin baked in at
+   build time via `make engine HUBPIN=...`). The pin does not restore
+   connectivity on a full-MITM network, but it guarantees that a
+   network whose proxy CA *is* trusted by your OS cannot silently read
+   the hub connection — the mismatch aborts loudly.
+
+Diagnostic aid: `CHUNKDROP_RELAY_ONLY=1` is unrelated to TLS but handy
+next to the above — it pins the transfer path to the hub relay so you
+can tell "hub reachable, tunnel broken" apart from "hub unreachable".
 
 ---
 
