@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"chunkdrop/internal/itls"
 
 	"github.com/coder/websocket"
 )
@@ -50,6 +53,13 @@ const (
 type Server struct {
 	// Logf renders one log line; defaults to [hub] log.Printf.
 	Logf func(format string, args ...any)
+
+	// ITLS, when set, enables the inner-TLS channel (M3): a client
+	// that sends the chunkdrop-itls1 marker first gets its plaintext
+	// ws connection wrapped in TLS (server side, this certificate) and
+	// continues the same protocol as NDJSON over the inner connection.
+	// nil (default) = feature off; marker clients are rejected.
+	ITLS *tls.Config
 
 	mu      sync.Mutex
 	clients map[string]*group // group tag → group
@@ -88,7 +98,7 @@ func (s *Server) Close() {
 	s.clients = map[string]*group{}
 	s.mu.Unlock()
 	for _, c := range all {
-		_ = c.ws.CloseNow()
+		c.lnk.kill()
 	}
 }
 
@@ -102,29 +112,115 @@ func (s *Server) logf(format string, args ...any) {
 
 // conn is one live client connection with its validated hello state.
 type conn struct {
-	ws   *websocket.Conn
+	lnk  link
 	tag  string
 	id   string
 	name string
 	pub  string
-	// wmu serializes writes: presence broadcasts, signaling relays and
-	// pings all write from different goroutines, and websocket
-	// connections allow only one concurrent writer.
-	wmu sync.Mutex
 	// replaced is set when a newer connection takes this device's
 	// presence slot: the loser stops broadcasting and lets its read
 	// loop wind down silently.
 	replaced bool
 }
 
-// write sends one text frame, serialized per connection.
-func (c *conn) write(data []byte) error {
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
+// link is the transport abstraction behind one connection: either a
+// plain websocket (legacy channel: text frames) or NDJSON over an
+// inner-TLS connection (M3 channel). The hub protocol is identical on
+// both — same JSON frames, different framing.
+type link interface {
+	// send writes one JSON frame; serialized by the implementation
+	// (websocket and tls.Conn both allow one writer at a time).
+	send(data []byte) error
+	// read returns the next JSON frame. Binary/control frames are
+	// consumed internally (keepalive lives in the transports).
+	read(ctx context.Context) ([]byte, error)
+	// kill hard-closes the transport without a close handshake (used
+	// for replaced connections and rejections).
+	kill()
+}
+
+// wsLink is the legacy channel: one websocket connection, frames as
+// text messages. Write serialization lives here (one writer per
+// socket); read tolerates binary frames after hello (ignored, as
+// always).
+type wsLink struct {
+	ws  *websocket.Conn
+	wmu sync.Mutex
+
+	// peeked carries the first frame when the handler already
+	// consumed it sniffing for the inner-TLS marker.
+	peeked  []byte
+	hasPeek bool
+}
+
+func (l *wsLink) send(data []byte) error {
+	l.wmu.Lock()
+	defer l.wmu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return c.ws.Write(ctx, websocket.MessageText, data)
+	return l.ws.Write(ctx, websocket.MessageText, data)
 }
+
+func (l *wsLink) read(ctx context.Context) ([]byte, error) {
+	if l.hasPeek {
+		l.hasPeek = false
+		d := l.peeked
+		l.peeked = nil
+		return d, nil
+	}
+	for {
+		typ, data, err := l.ws.Read(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if typ == websocket.MessageText {
+			return data, nil
+		}
+		// Binary after hello: never part of the protocol — ignored
+		// (forward compatibility), exactly like the old read loop.
+	}
+}
+
+func (l *wsLink) kill() { _ = l.ws.CloseNow() }
+
+// ndjsonLink is the inner-TLS channel (M3): the hub protocol's JSON
+// frames as newline-delimited lines over a tls.Conn that itself rides
+// inside a websocket (internal/itls).
+type ndjsonLink struct {
+	tlsConn *tls.Conn
+	sc      *itls.FrameScanner
+	wmu     sync.Mutex // tls.Conn: one writer at a time
+}
+
+func (l *ndjsonLink) send(data []byte) error {
+	l.wmu.Lock()
+	defer l.wmu.Unlock()
+	// tls.Conn.Write goes through the itls.Transport, whose ws Write
+	// carries its own timeout — a stalled peer cannot wedge this
+	// forever.
+	return itls.WriteFrame(l.tlsConn, data)
+}
+
+func (l *ndjsonLink) read(ctx context.Context) ([]byte, error) {
+	// The scanner read has no context: cancel unblocks via a hard
+	// Close (the deadline no-op makes ctx-driven conn deadlines
+	// useless here — see itls.Transport).
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = l.tlsConn.Close()
+		case <-done:
+		}
+	}()
+	return l.sc.Next()
+}
+
+func (l *ndjsonLink) kill() { _ = l.tlsConn.Close() }
+
+// write sends one JSON frame through the connection's link.
+func (c *conn) write(data []byte) error { return c.lnk.send(data) }
 
 // Handler returns the hub's HTTP tree: /hub/ws (upgrade) + /healthz.
 // nginx terminates TLS in front of it (DEPLOY-VPS.md); the hub itself
@@ -139,8 +235,9 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// handleWS upgrades, reads exactly one hello, validates it, then
-// serves presence until the connection dies.
+// handleWS upgrades, sniffs the first frame for the inner-TLS marker
+// (M3), reads exactly one hello, validates it, then serves presence
+// until the connection dies.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// The dashboard never talks to the hub directly (the engine
@@ -157,6 +254,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Dead-connection detection: ping the peer regularly and close
 	// the socket when pongs stop; the read loop (no idle deadline —
 	// see PingEvery) unblocks on the close and runs leave() below.
+	// In inner-TLS mode this pings the OUTER ws as before; pongs are
+	// answered inside the transport's ws.Read.
 	pingCtx, cancelPing := context.WithCancel(r.Context())
 	defer cancelPing()
 	go func() {
@@ -178,7 +277,32 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	c, ok := s.readHello(ws)
+	// Sniff the first frame: a binary chunkdrop-itls1 marker switches
+	// the connection into inner-TLS mode; anything else is the legacy
+	// channel, starting with the hello itself.
+	sniffCtx, cancelSniff := context.WithTimeout(r.Context(), 10*time.Second)
+	typ, first, err := ws.Read(sniffCtx)
+	cancelSniff()
+	if err != nil {
+		return
+	}
+	var lnk link
+	switch {
+	case itls.IsMarker(typ, first):
+		lnk = s.itlsLink(ws, r.Context())
+		if lnk == nil {
+			return
+		}
+	case typ == websocket.MessageBinary:
+		// Some other binary payload as the first frame: invalid in
+		// both channels.
+		s.reject(&wsLink{ws: ws}, "hello must be a text frame")
+		return
+	default:
+		lnk = &wsLink{ws: ws, peeked: first, hasPeek: true}
+	}
+
+	c, ok := s.readHello(lnk)
 	if !ok {
 		cancelPing()
 		return
@@ -193,46 +317,58 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// frames never terminate Read, so a deadline would kill quiet
 	// but healthy connections).
 	for {
-		typ, data, err := ws.Read(r.Context())
+		data, err := lnk.read(r.Context())
 		if err != nil {
 			s.logf("leave: %s (%s) read error: %v", c.id, c.name, err)
 			s.leave(c)
 			return
 		}
-		if typ == websocket.MessageText {
-			s.handleFrame(c, data)
-		}
+		s.handleFrame(c, data)
 	}
+}
+
+// itlsLink upgrades a marker-sending ws connection into the M3 inner
+// TLS channel and returns its NDJSON link (nil after a logged
+// failure; the outer ws closes via the handler's defer).
+func (s *Server) itlsLink(ws *websocket.Conn, ctx context.Context) link {
+	if s.ITLS == nil {
+		// Feature off: answer on the plain ws the client is still on.
+		s.reject(&wsLink{ws: ws}, "inner TLS disabled on this hub")
+		return nil
+	}
+	tr := itls.NewTransport(ctx, ws)
+	tlsConn, err := itls.Server(tr, s.ITLS)
+	if err != nil {
+		s.logf("inner TLS handshake failed: %v", err)
+		return nil
+	}
+	return &ndjsonLink{tlsConn: tlsConn, sc: itls.NewFrameScanner(tlsConn, MaxReadLimit)}
 }
 
 // readHello waits for and validates the first frame. On failure it
 // sends {"type":"error",...} and closes.
-func (s *Server) readHello(ws *websocket.Conn) (*conn, bool) {
+func (s *Server) readHello(lnk link) (*conn, bool) {
 	// The hello must arrive promptly: no idle connection squatting.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	typ, data, err := ws.Read(ctx)
+	data, err := lnk.read(ctx)
 	if err != nil {
-		return nil, false
-	}
-	if typ != websocket.MessageText {
-		s.reject(ws, "hello must be a text frame")
 		return nil, false
 	}
 	var h Hello
 	if err := json.Unmarshal(data, &h); err != nil {
-		s.reject(ws, "bad hello: not valid JSON")
+		s.reject(lnk, "bad hello: not valid JSON")
 		return nil, false
 	}
 	if h.Type != "hello" {
-		s.reject(ws, "first message must be hello")
+		s.reject(lnk, "first message must be hello")
 		return nil, false
 	}
 	if err := validateHello(&h); err != nil {
-		s.reject(ws, "hello rejected: "+err.Error())
+		s.reject(lnk, "hello rejected: "+err.Error())
 		return nil, false
 	}
-	return &conn{ws: ws, tag: h.Tag, id: h.ID, name: h.Name, pub: h.Pub}, true
+	return &conn{lnk: lnk, tag: h.Tag, id: h.ID, name: h.Name, pub: h.Pub}, true
 }
 
 // validateHello checks shapes and both proofs: group-key knowledge
@@ -389,14 +525,14 @@ func (s *Server) join(c *conn) {
 	}
 	if old, ok := g.conns[c.id]; ok && old != c {
 		old.replaced = true
-		// CloseNow, not Close: a graceful close waits up to 5 s for
-		// the old client's echo, and that client is gone (it is the
-		// one redialing as c). Under the hub lock that stall would
-		// freeze every join in the group.
-		_ = old.ws.CloseNow()
+		// kill, not a graceful close: a graceful close waits up to 5 s
+		// for the old client's echo, and that client is gone (it is
+		// the one redialing as c). Under the hub lock that stall
+		// would freeze every join in the group.
+		old.lnk.kill()
 	} else if len(g.conns) >= MaxDevicesPerGroup {
 		s.mu.Unlock()
-		s.reject(c.ws, "device limit reached for this group")
+		s.reject(c.lnk, "device limit reached for this group")
 		return
 	}
 	g.conns[c.id] = c
@@ -472,12 +608,10 @@ func broadcast(targets []*conn, peers []Peer) {
 // (used before hello success and for cap violations) — the rejected
 // client may not be reading, and a graceful close would stall this
 // connection's goroutine for its full echo timeout.
-func (s *Server) reject(ws *websocket.Conn, msg string) {
+func (s *Server) reject(lnk link, msg string) {
 	data, _ := json.Marshal(Error{Type: "error", Error: msg})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = ws.Write(ctx, websocket.MessageText, data)
-	cancel()
-	_ = ws.CloseNow()
+	_ = lnk.send(data)
+	lnk.kill()
 	s.logf("reject: %s", msg)
 }
 

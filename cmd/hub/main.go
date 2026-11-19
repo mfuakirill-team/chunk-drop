@@ -7,6 +7,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -18,7 +19,7 @@ import (
 	"chunkdrop/internal/hub"
 )
 
-const version = "0.1.0-m2.2"
+const version = "0.1.0-m2.3"
 
 func usage() {
 	fmt.Print(`hub — ChunkDrop coordination server (M2)
@@ -40,6 +41,8 @@ func main() {
 
 	addr := flag.String("addr", ":8080", "listen address (nginx proxies to this)")
 	debug := flag.Bool("debug", false, "verbose logging (join/leave, unknown frames)")
+	itlsCert := flag.String("inner-tls-cert", "", "certificate (fullchain PEM) for the inner-TLS channel — clients that send the itls1 marker over plaintext ws:// get real TLS inside the tunnel (M3)")
+	itlsKey := flag.String("inner-tls-key", "", "certificate key (PEM) for --inner-tls-cert; the same pair nginx uses on 443")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
 	flag.Parse()
@@ -52,6 +55,24 @@ func main() {
 	h := hub.New()
 	if *debug {
 		h.Logf = func(format string, args ...any) { log.Printf("[hub] "+format, args...) }
+	}
+
+	// Inner-TLS channel (M3): optional. Without the pair the hub stays
+	// a plain-ws service and marker clients are rejected — legacy
+	// behavior untouched.
+	if (*itlsCert == "") != (*itlsKey == "") {
+		log.Fatalf("--inner-tls-cert and --inner-tls-key go together")
+	}
+	if *itlsCert != "" {
+		cert, err := tls.LoadX509KeyPair(*itlsCert, *itlsKey)
+		if err != nil {
+			log.Fatalf("inner TLS cert: %v", err)
+		}
+		h.ITLS = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		log.Printf("inner-TLS channel on: itls1 over ws:// terminates with %s", *itlsCert)
 	}
 
 	srv := &http.Server{Addr: *addr, Handler: h.Handler()}
