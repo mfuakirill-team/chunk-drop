@@ -35,19 +35,35 @@ HUBPIN_FALLBACK ?=
 # chain + hostname verification (-verify_hostname -verify_return_error).
 # A MITM'd build network makes verification fail and yields an EMPTY
 # pin — which falls back to HUBPIN_FALLBACK — never a poisoned one.
-# An explicit `make engine HUBPIN=sha256/...` overrides both.
-# Recursive (?=) assignment: openssl runs only when a binary is
-# actually linked, not on every make invocation.
+# An explicit `make engine HUBPIN=<sha256/... or bare base64>`
+# overrides the live fetch. Recursive (?=) assignment: openssl runs
+# only when a binary is actually linked, not on every make invocation.
+# The fetch emits the prefixed runtime form ("sha256/<base64>") —
+# the -X stamp is the raw DefaultPin string, and the engine's pin
+# parser REQUIRES the prefix; a bare base64 baked here fails every
+# dial with "want sha256/ + base64" (the regression this guards).
 HUBPIN ?= $(shell pem=$$(openssl s_client -connect $(HUBHOST):443 -servername $(HUBHOST) -verify_hostname $(HUBHOST) -verify_return_error </dev/null 2>/dev/null \
 	| openssl x509 -pubkey -noout 2>/dev/null); \
 	if [ -n "$$pem" ]; then printf '%s\n' "$$pem" \
 		| openssl pkey -pubin -outform DER 2>/dev/null \
 		| openssl dgst -sha256 -binary | base64; fi)
 
-# The pin actually baked: auto-fetched HUBPIN (explicit override or
-# verified live fetch) wins; the committed fallback is second; nothing
-# means no baked pin (current behavior — pin comes from config only).
-bakedpin = $(strip $(if $(strip $(HUBPIN)),$(HUBPIN),$(HUBPIN_FALLBACK)))
+# pin_norm: one entry → the runtime form. Accepts bare base64 (what
+# the hash pipeline produces) or already-prefixed values (an explicit
+# HUBPIN=sha256/...). filter gives an exact prefix test — no
+# substring games.
+pin_norm = $(if $(filter sha256/%,$(1)),$(1),$(if $(strip $(1)),sha256/$(1),))
+
+# The pins actually baked: auto-fetched HUBPIN (explicit override or
+# verified live fetch) FIRST, the committed fallback SECOND, joined
+# with a comma when both exist (the engine's DefaultPin accepts a
+# comma list — so a certbot key rotation with a refreshed fallback
+# keeps the old key accepted). Nothing → no baked pin (pin comes from
+# config only).
+comma := ,
+pin_auto = $(strip $(call pin_norm,$(HUBPIN)))
+pin_fall = $(strip $(call pin_norm,$(HUBPIN_FALLBACK)))
+bakedpin = $(pin_auto)$(if $(pin_auto),$(if $(pin_fall),$(comma)))$(pin_fall)
 
 LDFLAGS = -s -w $(if $(strip $(bakedpin)),-X chunkdrop/internal/hubclient.DefaultPin=$(bakedpin))
 BUILDFLAGS = -trimpath -buildvcs=false -ldflags="$(LDFLAGS)"
