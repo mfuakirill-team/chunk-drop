@@ -130,6 +130,14 @@ connection** (docs/PROTOCOL.md §5): the cert is presented live by the
 hub *inside* the tunnel and verified against the system roots +
 `hub_cert_pin` — nothing cert-shaped is baked into engine binaries.
 
+> **REQUIRED, not optional.** On intercepting networks the engine's
+> first hop is the `:80 /hub/ws` endpoint — without the port-80
+> location block below the inner-TLS channel cannot work anywhere, and
+> a proxy that answers `:80` on the client's network answers with a
+> redirect into its own TLS (engine dials must never follow redirects,
+> so such a network fails loudly with the 30x status instead of a
+> misleading x509 error). Do not skip step 1.
+
 Steps (this is the one part that cannot be tested from a dev box —
 it needs the VPS):
 
@@ -161,6 +169,22 @@ install -m 0640 -o 65532 -g 65532 /etc/letsencrypt/live/drop.404.mn/privkey.pem 
 cd /root/chunkdrop/deploy && docker compose restart hub
 EOF
 chmod +x /etc/letsencrypt/renewal-hooks/deploy/chunkdrop-certs.sh
+
+# 4. KEY REUSE — required for the pin baked into engine binaries:
+#    the engines pin the LEAF PUBLIC KEY (SPKI). By default certbot
+#    generates a new key at every renewal, which would silently
+#    invalidate every baked pin at the next renewal. Turn key reuse on
+#    once (Certbot ≥ 2.3); combined with the deploy hook above the pin
+#    then survives renewals indefinitely (the cert rotates, the key
+#    does not):
+certbot reconfigure --cert-name drop.404.mn --reuse-key
+#    (Older certbot: add `reuse_key = True` under [renewalparams] in
+#    /etc/letsencrypt/renewal/drop.404.mn.conf, or run one
+#    `certbot renew --cert-name drop.404.mn --reuse-key --force-renewal`,
+#    which persists the option. If the key ever DOES rotate
+#    deliberately — e.g. a compromise — the new pin arrives from
+#    `make pin HOST=drop.404.mn`; engines accept old+new pins
+#    comma-separated in hub_cert_pin during the transition.)
 ```
 
 Smoke tests (from a normal network — the classic wss channel must keep
@@ -178,10 +202,14 @@ npx wscat -c ws://drop.404.mn/hub/ws
 #   GET /api/hub → "channel": "ws-tls" and connected: true
 ```
 
-Optional hardening, per engine (`engine.toml`): `hub_cert_pin` with
-`make pin HOST=drop.404.mn` output (comma-separated old+new across a
-key rotation). With the pin set, even a proxy whose root CA the OS
-trusts cannot silently read the hub connection.
+Hardening: engines shipped from this repo **bake the hub leaf-certificate
+pin in at build time** (Makefile `HUBPIN_FALLBACK` / auto-fetched
+`HUBPIN`; see the Makefile header). With the pin set — baked or per
+engine in `engine.toml` (`hub_cert_pin`, comma-separated old+new across
+a key rotation) — even a proxy whose root CA the OS trusts cannot
+silently read the hub connection: the mismatch aborts loudly. The
+`--reuse-key` step above is what keeps a baked pin valid across
+renewals.
 - CPU: negligible — all crypto lives in the clients by design.
 - Disk: the image itself; **zero user data, ever**.
 - Bandwidth: STUN binding requests are tiny; P2P WebRTC transfers cost

@@ -326,6 +326,7 @@ func (c *Client) dialChannel(dialCtx, lifetime context.Context, ch string) (cLin
 	case ChanWS:
 		ws, _, err := websocket.Dial(dialCtx, c.wsURL(), &websocket.DialOptions{
 			HTTPHeader: nil,
+			HTTPClient: hubHTTPClient(),
 		})
 		if err != nil {
 			return nil, err
@@ -346,6 +347,7 @@ func (c *Client) dialItls(dialCtx, lifetime context.Context) (cLink, error) {
 	wsURL := c.wsURL()
 	ws, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{
 		HTTPHeader: nil,
+		HTTPClient: hubHTTPClient(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ws dial %s: %w", wsURL, err)
@@ -477,6 +479,24 @@ func (c *Client) serveLink(ctx context.Context, lnk cLink, ch string) error {
 	}
 }
 
+// hubHTTPClient is the HTTP client used for every hub websocket
+// dial: the default transport (proxy rules intact) with redirect
+// following DISABLED. A websocket upgrade must never follow an
+// http→https redirect: on redirecting networks (captive portals,
+// corporate proxies that answer :80) the followed request lands in
+// the TLS interceptor and dies with a misleading x509 error — hiding
+// the real problem, "the hub endpoint answered with a redirect" — and
+// a redirect could in general silently retarget the hub connection.
+// The 30x response surfaces as a dial error instead.
+func hubHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: cloneDefaultTransport(),
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // dial opens the websocket. On wss endpoints it applies certificate
 // pins (hub_cert_pin / build-time DefaultPin) in addition to the
 // standard chain verification, and honors TLSRoots instead of the
@@ -487,6 +507,7 @@ func (c *Client) serveLink(ctx context.Context, lnk cLink, ch string) error {
 func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
 	opts := &websocket.DialOptions{
 		HTTPHeader: nil, // nothing sensitive travels in headers
+		HTTPClient: hubHTTPClient(),
 	}
 	if !strings.HasPrefix(strings.ToLower(c.URL), "wss://") {
 		if pins, _ := c.activePins(); len(pins) > 0 {

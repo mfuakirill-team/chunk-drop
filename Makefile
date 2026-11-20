@@ -9,15 +9,48 @@ NODE ?= npm
 # fails (exit 128, dubious ownership) when the repo is mounted into a
 # container owned by another uid — CI does exactly that. Nothing reads
 # the VCS stamp (the version string is set in code), so it's off.
-LDFLAGS := -s -w
-# HUBPIN=<sha256/...> bakes the hub certificate pin into every binary
-# built in this invocation (internal/hubclient.DefaultPin). Get the
-# value with `make pin HOST=drop.404.mn`. Config hub_cert_pin wins
-# when set.
-ifneq ($(strip $(HUBPIN)),)
-LDFLAGS += -X chunkdrop/internal/hubclient.DefaultPin=$(HUBPIN)
-endif
-BUILDFLAGS := -trimpath -buildvcs=false -ldflags="$(LDFLAGS)"
+
+# ── Hub pin: baked by default ──────────────────────────────────────
+# The hub domain is fixed; the leaf certificate's SPKI pin is baked
+# into every linked binary (internal/hubclient.DefaultPin) so shipped
+# builds verify the hub out of the box. A config hub_cert_pin still
+# wins when set.
+
+# Hub host (fixed in practice; override only for smoke setups).
+HUBHOST ?= drop.404.mn
+
+# HUBPIN_FALLBACK: committed fallback pin, used when the auto-fetch
+# below yields nothing (hub unreachable from the build machine, or its
+# certificate fails verification). Fill it from a trusted network —
+# ideally the VPS itself — and paste the "sha256/..." line here:
+#
+#     make pin HOST=drop.404.mn
+#
+# NOTE: certbot renewals must reuse the key (deploy step: certbot
+# --reuse-key) or a new leaf key invalidates this pin. See
+# docs/DEPLOY-VPS.md §7.
+HUBPIN_FALLBACK ?=
+
+# HUBPIN: auto-fetched from the live hub at build time, with FULL
+# chain + hostname verification (-verify_hostname -verify_return_error).
+# A MITM'd build network makes verification fail and yields an EMPTY
+# pin — which falls back to HUBPIN_FALLBACK — never a poisoned one.
+# An explicit `make engine HUBPIN=sha256/...` overrides both.
+# Recursive (?=) assignment: openssl runs only when a binary is
+# actually linked, not on every make invocation.
+HUBPIN ?= $(shell pem=$$(openssl s_client -connect $(HUBHOST):443 -servername $(HUBHOST) -verify_hostname $(HUBHOST) -verify_return_error </dev/null 2>/dev/null \
+	| openssl x509 -pubkey -noout 2>/dev/null); \
+	if [ -n "$$pem" ]; then printf '%s\n' "$$pem" \
+		| openssl pkey -pubin -outform DER 2>/dev/null \
+		| openssl dgst -sha256 -binary | base64; fi)
+
+# The pin actually baked: auto-fetched HUBPIN (explicit override or
+# verified live fetch) wins; the committed fallback is second; nothing
+# means no baked pin (current behavior — pin comes from config only).
+bakedpin = $(strip $(if $(strip $(HUBPIN)),$(HUBPIN),$(HUBPIN_FALLBACK)))
+
+LDFLAGS = -s -w $(if $(strip $(bakedpin)),-X chunkdrop/internal/hubclient.DefaultPin=$(bakedpin))
+BUILDFLAGS = -trimpath -buildvcs=false -ldflags="$(LDFLAGS)"
 
 .PHONY: all web engine hub engine-win engine-linux engine-mac test clean pin help
 
@@ -59,14 +92,21 @@ test:
 	$(GO) test ./...
 
 ## pin: fetch the hub certificate's SPKI pin (HOST=drop.404.mn).
-## Prints "sha256/<base64>" — put that in engine.toml (hub_cert_pin)
-## or pass HUBPIN=<that> to make engine.
+## Prints "sha256/<base64>" — put that in HUBPIN_FALLBACK in this
+## Makefile (bakes it into every build), in engine.toml (hub_cert_pin),
+## or pass HUBPIN=<that> to make engine. The certificate is verified
+## (chain + hostname) first — against a MITM'd network this prints
+## nothing and fails, rather than handing you an attacker's pin.
+pin: HOST ?= $(HUBHOST)
 pin:
-	@echo "pin for $(HOST) (leaf certificate public key):"
-	@echo "sha256/$$(openssl s_client -servername $(HOST) -connect $(HOST):443 </dev/null 2>/dev/null \
-		| openssl x509 -pubkey -noout \
-		| openssl pkey -pubin -outform DER \
-		| openssl dgst -sha256 -binary | base64)"
+	@echo "pin for $(HOST) (leaf certificate public key, verified):"
+	@p=$$(pem=$$(openssl s_client -connect $(HOST):443 -servername $(HOST) -verify_hostname $(HOST) -verify_return_error </dev/null 2>/dev/null \
+		| openssl x509 -pubkey -noout 2>/dev/null); \
+	if [ -n "$$pem" ]; then printf '%s\n' "$$pem" \
+		| openssl pkey -pubin -outform DER 2>/dev/null \
+		| openssl dgst -sha256 -binary | base64; fi); \
+	if [ -n "$$p" ]; then echo "sha256/$$p"; \
+	else echo "EMPTY — certificate verification failed against $(HOST); not printing an untrusted pin" >&2; exit 1; fi
 
 ## clean: build artifacts
 clean:

@@ -1,6 +1,7 @@
 package hubclient
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -289,4 +291,38 @@ func TestStopCancelsItlsDial(t *testing.T) {
 	waitFor(t, 5*time.Second, "connection", c.Connected)
 	c.Stop()
 	waitFor(t, 2*time.Second, "stop", func() bool { return !c.Connected() })
+}
+
+// TestDialNeverFollowsRedirect: a redirecting :80 endpoint (captive
+// portal, corporate proxy answering before nginx) must fail the dial
+// with the 30x status — never be followed into the TLS interceptor,
+// where it would surface as a misleading x509 error. Regression for
+// the field bug: ws://dial → proxy 301 → https://GET → "x509:
+// unknown authority" instead of the truth.
+func TestDialNeverFollowsRedirect(t *testing.T) {
+	// Target of the redirect is https:// to make any future
+	// redirect-following produce a TLS failure, not a clean hop.
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://127.0.0.1:1/hub/ws")
+		w.WriteHeader(http.StatusMovedPermanently)
+	}))
+	defer redir.Close()
+	wsURL := "ws" + strings.TrimPrefix(redir.URL, "http") + "/hub/ws"
+
+	id := testIdentity(t, "engine-redir")
+	c := New(wsURL, "group-redir", id, t.Logf)
+
+	ctx := context.Background()
+	for _, ch := range []string{ChanWS, ChanWSTLS} {
+		_, err := c.dialChannel(ctx, ctx, ch)
+		if err == nil {
+			t.Fatalf("%s dial succeeded against a redirecting endpoint", ch)
+		}
+		if !strings.Contains(err.Error(), "301") {
+			t.Fatalf("%s dial error = %v, want the 301 status surfaced", ch, err)
+		}
+		if strings.Contains(err.Error(), "x509") {
+			t.Fatalf("%s dial followed the redirect into TLS: %v", ch, err)
+		}
+	}
 }

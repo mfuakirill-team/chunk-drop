@@ -579,6 +579,14 @@ means **your network is intercepting TLS** (a corporate/hotel/campus
 proxy terminating `:443` with its own certificate). The engine refuses
 it — correctly: that proxy could read everything to and from the hub.
 
+Note the URL in the error: hub websocket dials **never follow HTTP
+redirects** (a redirect could retarget the hub connection, and on
+intercepting networks the followed request dies with a misleading x509
+error instead of the truth). If you see a `30x`/`got status` error on a
+`ws://` dial, whatever answered `:80` on your network — a captive
+portal or corporate proxy, not the hub — is the problem; a VPN or a
+network without interception is the fix, not a config change.
+
 Options, in order of preference:
 
 1. **Nothing to do (M3 default).** If the hub runs with the inner-TLS
@@ -597,10 +605,12 @@ Options, in order of preference:
    Note: static Go binaries ignore `proxychains`-style injection
    (no dynamic linker hooks) — environment variables are the way.
 3. **Pin the hub certificate** (`hub_cert_pin`, or the pin baked in at
-   build time via `make engine HUBPIN=...`). The pin does not restore
-   connectivity on a full-MITM network, but it guarantees that a
-   network whose proxy CA *is* trusted by your OS cannot silently read
-   the hub connection — the mismatch aborts loudly.
+   build time — shipped builds carry the hub's leaf-key pin by default,
+   so nothing needs to be written into `engine.toml` unless you build
+   yourself or rotate keys). The pin does not restore connectivity on a
+   full-MITM network, but it guarantees that a network whose proxy CA
+   *is* trusted by your OS cannot silently read the hub connection —
+   the mismatch aborts loudly.
 
 Diagnostic aid: `CHUNKDROP_RELAY_ONLY=1` is unrelated to TLS but handy
 next to the above — it pins the transfer path to the hub relay so you
